@@ -13,7 +13,7 @@ extract:
 
   # API key / token for Milvus (string, mandatory). Default: 'root:Milvus'
   #api_key: 'root:Milvus'
-  api_key: '57b701da57c8b81dcb2f632c3794ddb065c72f7284cae6af106d0662fb4715f2c1cc26b4f49a53fe43781fe79e5890268e0b9419'
+  api_key: 'redacted'
 
   # Batch size for query_iterator (int, 1–16384). Default: 2000
   buffer: 2000
