@@ -301,7 +301,7 @@ def _run_dump_schema_all(endpoint: str, api_key: str, database: str, out_dir: Pa
 @click.option(
     "--dump-schema",
     is_flag=True,
-    help="Dump the given collection schema as JSON in a directory named after the database.",
+    help="Dump the given collection schema as JSON in a directory named after the database. Use with -c/--collection to specify the collection.",
 )
 @click.option(
     "--dump-schema-all",
@@ -340,7 +340,7 @@ def main(
             run_extract(config)
             return
     elif not any(actions):
-        raise click.UsageError("Config file -f is required for extract.")
+        raise click.UsageError("Config file -f is required for data extract. Use --help for more available actions")
     if list_databases:
         _run_list_databases(endpoint, api_key)
         return
