@@ -311,6 +311,21 @@ def _run_dump_schema_all(endpoint: str, api_key: str, database: str, out_dir: Pa
         click.echo(f"Wrote {path}")
 
 
+def _run_dump_indexes(
+    endpoint: str, api_key: str, database: str, collection: str, out_dir: Path
+) -> None:
+    client = _client(endpoint, api_key, db_name=database)
+    indexes = client.list_indexes(collection_name=collection)
+    indexes_dir = out_dir / database
+    indexes_dir.mkdir(parents=True, exist_ok=True)
+    index_desc = []
+    for index in indexes:
+        index_desc.append(str(client.describe_index(collection_name=collection, index_name=index)))
+    
+    with open(indexes_dir / f"{collection}__indexes.json", "a") as f:
+        f.write('\n'.join(index_desc))
+    click.echo(f"Wrote {indexes_dir / f"{collection}__indexes.json"}")
+
 @click.command()
 @click.option(
     "-d",
@@ -345,12 +360,17 @@ def _run_dump_schema_all(endpoint: str, api_key: str, database: str, out_dir: Pa
 @click.option(
     "--dump-schema",
     is_flag=True,
-    help="Dump the given collection schema as JSON in a directory named after the database. Use with -c/--collection to specify the collection.",
+    help="Write given collection schema as JSON in schema_dir/dbname/ Use with -d/--database and -c/--collection",
 )
 @click.option(
     "--dump-schema-all",
     is_flag=True,
-    help="Dump all collection schemas as JSON in a directory named after the database.",
+    help="Write all collection schemas as JSON in schema_dir/dbname/ Use with -d/--database",
+)
+@click.option(
+    "--dump-indexes",
+    is_flag=True,
+    help="Write given collection's indexes as JSON in schema_dir/dbname/ Use with -d/--database and -c/--collection"
 )
 @click.option(
     "--schema-dir",
@@ -367,12 +387,15 @@ def main(
     list_collections: bool,
     dump_schema: bool,
     dump_schema_all: bool,
+    dump_indexes: bool,
     schema_dir: Path,
 ) -> None:
     """Pull data from a Milvus endpoint via query_iterator and write to disk."""
-    actions = [list_databases, list_collections, dump_schema, dump_schema_all]
+    actions = [list_databases, list_collections, dump_schema, dump_schema_all, dump_indexes]
     if sum(actions) > 1:
-        raise click.UsageError("At most one of --list-databases, --list-collections, --dump-schema, --dump-schema-all may be set.")
+        raise click.UsageError(
+            "At most one of --list-databases, --list-collections, --dump-schema, --dump-schema-all, --dump-indexes may be set."
+        )
     api_key = DEFAULTS["api_key"]
     if connect_config_file is not None:
         if extract_config_file is not None:
@@ -406,11 +429,18 @@ def main(
     if dump_schema:
         if not collection or not database:
             raise click.UsageError("--dump-schema requires -c/--collection and -d/--database.")
-            return
         _run_dump_schema(endpoint, api_key, database, collection, schema_dir)
         return
     if dump_schema_all:
+        if database is None:
+            database = DEFAULTS["database"]
+            click.echo(f"WARN: Database -d db_name not provided on command line. Using default database {DEFAULTS['database']}")
         _run_dump_schema_all(endpoint, api_key, database, schema_dir)
+        return
+    if dump_indexes:
+        if not collection or not database:
+            raise click.UsageError("--dump-indexes requires -c/--collection and -d/--database.")
+        _run_dump_indexes(endpoint, api_key, database, collection, schema_dir)
         return
     assert False, "unreachable"
 
