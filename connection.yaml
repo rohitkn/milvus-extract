@@ -1,0 +1,9 @@
+# Milvus connection credentials
+# Use with: python extract.py -i connection.yaml
+
+connect:
+  # Milvus endpoint (string, mandatory). Default: https://localhost:19530
+  endpoint: http://localhost:19530
+  
+  # API key / token for Milvus (string, mandatory). Default: 'root:Milvus'
+  api_key: 'root:Milvus'

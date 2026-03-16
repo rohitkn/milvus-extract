@@ -7,7 +7,10 @@ and writes to disk (JSON or Parquet) at file:// or s3:// locations.
 import json
 from pathlib import Path
 from typing import Any
-
+from grpc.aio import UsageError
+from numpy import extract
+from pymilvus.exceptions import ConnectionConfigException
+from pymilvus.exceptions import MilvusException
 import click
 import yaml
 
@@ -20,7 +23,7 @@ DEFAULTS = {
     "api_key": "root:Milvus",
     "buffer": 2000,
     "filter_expression": "",
-    "export_file_type": "JSON",
+    "export_file_type": "PARQUET",
     "output_location": "",
 }
 
@@ -33,79 +36,100 @@ CLOUD_STORAGE_DEFAULTS = {
 
 EXPORT_TYPES = ("JSON", "PARQUET")
 BUFFER_MIN, BUFFER_MAX = 1, 16384
-CONFIG_ROOT = "extract"
+EXTRACT_CONFIG_ROOT = "extract"
+CONNECT_CONFIG_ROOT = "connect"
 
 
-def load_config(path: str) -> dict[str, Any]:
-    """Load and validate config from YAML file."""
-    with open(path) as f:
-        data = yaml.safe_load(f)
-    if not data or CONFIG_ROOT not in data:
-        raise click.BadParameter(f"YAML must have a root key '{CONFIG_ROOT}'")
-    raw = data[CONFIG_ROOT] or {}
+def load_config(extract_config_path: str, connect_config_path: str | None = None) -> dict[str, Any]:
+    
+    # Load connection credentials from connect_config_path
+    if connect_config_path:
+        with open(connect_config_path) as f:
+            connect_data = yaml.safe_load(f)
+        if not connect_data or "connect" not in connect_data:
+            raise click.BadParameter(f"YAML must have a root key 'connect'")
+        connect_raw = connect_data["connect"] or {}
+        endpoint = connect_raw.get("endpoint", DEFAULTS["endpoint"])
+        api_key = connect_raw.get("api_key", DEFAULTS["api_key"])
+
+        if not isinstance(endpoint, str):
+            raise click.BadParameter("endpoint must be a string")
+        if not isinstance(api_key, str):
+            raise click.BadParameter("api_key must be a string")
+        return {
+        "endpoint": endpoint,
+        "api_key": api_key
+        }
 
     # Apply defaults and type checks
-    database = raw.get("database", DEFAULTS["database"])
-    collection = raw.get("collection", DEFAULTS["collection"])
-    endpoint = raw.get("endpoint", DEFAULTS["endpoint"])
-    api_key = raw.get("api_key", DEFAULTS["api_key"])
-    buffer = raw.get("buffer", DEFAULTS["buffer"])
-    filter_expression = raw.get("filter_expression", DEFAULTS["filter_expression"])
-    export_file_type = raw.get("export_file_type", DEFAULTS["export_file_type"])
-    output_location = raw.get("output_location", DEFAULTS["output_location"])
+    # Load connection credentials from extract_config
+    if extract_config_path:
+        with open(extract_config_path) as f:
+            data = yaml.safe_load(f)
+        if not data or EXTRACT_CONFIG_ROOT not in data:
+            raise click.BadParameter(f"YAML must have a root key '{EXTRACT_CONFIG_ROOT}'")
+        raw = data[EXTRACT_CONFIG_ROOT] or {}
+        database = raw.get("database", DEFAULTS["database"])
+        collection = raw.get("collection", DEFAULTS["collection"])
+        endpoint = raw.get("endpoint", DEFAULTS["endpoint"])
+        api_key = raw.get("api_key", DEFAULTS["api_key"])
+        buffer = raw.get("buffer", DEFAULTS["buffer"])
+        filter_expression = raw.get("filter_expression", DEFAULTS["filter_expression"])
+        export_file_type = raw.get("export_file_type", DEFAULTS["export_file_type"])
+        output_location = raw.get("output_location", DEFAULTS["output_location"])
 
-    if not isinstance(database, str):
-        raise click.BadParameter("database must be a string")
-    if not isinstance(collection, str):
-        raise click.BadParameter("collection must be a string")
-    if not isinstance(endpoint, str):
-        raise click.BadParameter("endpoint must be a string")
-    if not isinstance(api_key, str):
-        raise click.BadParameter("api_key must be a string")
-    if not isinstance(filter_expression, str):
-        raise click.BadParameter("filter_expression must be a string")
-    if not isinstance(output_location, str):
-        raise click.BadParameter("output_location must be a string")
+        if not isinstance(database, str):
+            raise click.BadParameter("database must be a string")
+        if not isinstance(collection, str):
+            raise click.BadParameter("collection must be a string")
+        if not isinstance(endpoint, str):
+            raise click.BadParameter("endpoint must be a string")
+        if not isinstance(api_key, str):
+            raise click.BadParameter("api_key must be a string")
+        if not isinstance(filter_expression, str):
+            raise click.BadParameter("filter_expression must be a string")
+        if not isinstance(output_location, str):
+            raise click.BadParameter("output_location must be a string")
 
-    buffer = int(buffer)
-    if not (BUFFER_MIN <= buffer <= BUFFER_MAX):
-        raise click.BadParameter(
-            f"buffer must be between {BUFFER_MIN} and {BUFFER_MAX}, got {buffer}"
-        )
+        buffer = int(buffer)
+        if not (BUFFER_MIN <= buffer <= BUFFER_MAX):
+            raise click.BadParameter(
+                f"buffer must be between {BUFFER_MIN} and {BUFFER_MAX}, got {buffer}"
+            )
 
-    export_file_type = str(export_file_type).upper()
-    if export_file_type not in EXPORT_TYPES:
-        raise click.BadParameter(
-            f"export_file_type must be one of {list(EXPORT_TYPES)}, got {export_file_type}"
-        )
+        export_file_type = str(export_file_type).upper()
+        if export_file_type not in EXPORT_TYPES:
+            raise click.BadParameter(
+                f"export_file_type must be one of {list(EXPORT_TYPES)}, got {export_file_type}"
+            )
 
-    raw_csp = raw.get("cloud_storage_params") or {}
-    csp_endpoint = raw_csp.get("endpoint", CLOUD_STORAGE_DEFAULTS["endpoint"])
-    csp_access_key = raw_csp.get("access_key", CLOUD_STORAGE_DEFAULTS["access_key"])
-    csp_secret_key = raw_csp.get("secret_key", CLOUD_STORAGE_DEFAULTS["secret_key"])
-    csp_storage_root = raw_csp.get("storage_root", CLOUD_STORAGE_DEFAULTS["storage_root"])
-    if not isinstance(csp_endpoint, str):
-        raise click.BadParameter("cloud_storage_params.endpoint must be a string")
-    if not isinstance(csp_access_key, str):
-        raise click.BadParameter("cloud_storage_params.access_key must be a string")
-    if not isinstance(csp_secret_key, str):
-        raise click.BadParameter("cloud_storage_params.secret_key must be a string")
-    if not isinstance(csp_storage_root, str):
-        raise click.BadParameter("cloud_storage_params.storage_root must be a string")
-    if output_location.strip().startswith("s3://"):
-        if not csp_access_key:
-            raise click.BadParameter("cloud_storage_params.access_key is mandatory for s3:// output")
-        if not csp_secret_key:
-            raise click.BadParameter("cloud_storage_params.secret_key is mandatory for s3:// output")
-        if not csp_storage_root:
-            raise click.BadParameter("cloud_storage_params.storage_root is mandatory for s3:// output")
+        raw_csp = raw.get("cloud_storage_params") or {}
+        csp_endpoint = raw_csp.get("endpoint", CLOUD_STORAGE_DEFAULTS["endpoint"])
+        csp_access_key = raw_csp.get("access_key", CLOUD_STORAGE_DEFAULTS["access_key"])
+        csp_secret_key = raw_csp.get("secret_key", CLOUD_STORAGE_DEFAULTS["secret_key"])
+        csp_storage_root = raw_csp.get("storage_root", CLOUD_STORAGE_DEFAULTS["storage_root"])
+        if not isinstance(csp_endpoint, str):
+            raise click.BadParameter("cloud_storage_params.endpoint must be a string")
+        if not isinstance(csp_access_key, str):
+            raise click.BadParameter("cloud_storage_params.access_key must be a string")
+        if not isinstance(csp_secret_key, str):
+            raise click.BadParameter("cloud_storage_params.secret_key must be a string")
+        if not isinstance(csp_storage_root, str):
+            raise click.BadParameter("cloud_storage_params.storage_root must be a string")
+        if output_location.strip().startswith("s3://"):
+            if not csp_access_key:
+                raise click.BadParameter("cloud_storage_params.access_key is mandatory for s3:// output")
+            if not csp_secret_key:
+                raise click.BadParameter("cloud_storage_params.secret_key is mandatory for s3:// output")
+            if not csp_storage_root:
+                raise click.BadParameter("cloud_storage_params.storage_root is mandatory for s3:// output")
 
-    cloud_storage_params = {
-        "endpoint": csp_endpoint,
-        "access_key": csp_access_key,
-        "secret_key": csp_secret_key,
-        "storage_root": csp_storage_root,
-    }
+        cloud_storage_params = {
+            "endpoint": csp_endpoint,
+            "access_key": csp_access_key,
+            "secret_key": csp_secret_key,
+            "storage_root": csp_storage_root,
+        }
 
     return {
         "database": database,
@@ -233,15 +257,35 @@ def _client(endpoint: str, api_key: str, db_name: str = "default"):
 
 
 def _run_list_databases(endpoint: str, api_key: str) -> None:
-    client = _client(endpoint, api_key)
+    try: 
+        client = _client(endpoint, api_key)
+    except ConnectionConfigException as e1:
+        click.echo(f"ERROR: Exception raised: {e1}, Please check endpoint and api_key")
+        return
+    except MilvusException as e2:
+        click.echo(f"ERROR: Exception raised: {e2}, Please check endpoint and api_key")
+        return
+    except Exception as e:
+        click.echo(f"ERROR: Exception connecting to Milvus: {e}")
+        return
     for name in client.list_databases():
-        click.echo(name)
+        click.echo(f"Database: {name}")
 
 
 def _run_list_collections(endpoint: str, api_key: str, database: str) -> None:
-    client = _client(endpoint, api_key, db_name=database)
+    try: 
+        client = _client(endpoint, api_key, db_name=database)
+    except ConnectionConfigException as e1:
+        click.echo(f"ERROR: Exception raised: {e1}, Please check endpoint and api_key")
+        return
+    except MilvusException as e2:
+        click.echo(f"ERROR: Exception raised: {e2}, Please check endpoint and api_key")
+        return
+    except Exception as e:
+        click.echo(f"ERROR: Exception connecting to Milvus: {e}")
+        return
     for name in client.list_collections():
-        click.echo(name)
+        click.echo(f"Collection: {name}")
 
 
 def _run_dump_schema(
@@ -251,7 +295,7 @@ def _run_dump_schema(
     desc = client.describe_collection(collection_name=collection)
     schema_dir = out_dir / database
     schema_dir.mkdir(parents=True, exist_ok=True)
-    path = schema_dir / f"{collection}.json"
+    path = schema_dir / f"{collection}__schema.json"
     path.write_text(json.dumps(desc, indent=2, default=str))
     click.echo(f"Wrote {path}")
 
@@ -262,39 +306,39 @@ def _run_dump_schema_all(endpoint: str, api_key: str, database: str, out_dir: Pa
     schema_dir.mkdir(parents=True, exist_ok=True)
     for name in client.list_collections():
         desc = client.describe_collection(collection_name=name)
-        path = schema_dir / f"{name}.json"
+        path = schema_dir / f"{name}__schema.json"
         path.write_text(json.dumps(desc, indent=2, default=str))
         click.echo(f"Wrote {path}")
 
 
 @click.command()
 @click.option(
-    "-e",
-    "endpoint",
-    "--endpoint",
-    required=True,
-    help="Milvus endpoint URL (e.g. https://localhost:19530)",
-)
-@click.option(
     "-d",
     "database",
     "--database",
-    default="default",
-    help="Database name (default: default).",
+    default=None,
+    help="Database name (default: None).",
 )
 @click.option(
     "-c",
     "collection",
     "--collection",
-    default="",
-    help="Collection name (default: empty).",
+    default=None,
+    help="Collection name (default: None).",
 )
 @click.option(
     "-f",
-    "config_file",
+    "extract_config_file",
     type=click.Path(exists=True, path_type=Path),
     default=None,
     help="Path to YAML config file (required for extract).",
+)
+@click.option(
+    "-i",
+    "connect_config_file",
+    type=click.Path(exists=True, path_type=Path),
+    default=None,
+    help="Path to YAML Milvus connection credentials file (for actions other than data extract)",
 )
 @click.option("--list-databases", is_flag=True, help="Print all database names.")
 @click.option("--list-collections", is_flag=True, help="Print all collection names for the given database.")
@@ -315,10 +359,10 @@ def _run_dump_schema_all(endpoint: str, api_key: str, database: str, out_dir: Pa
     help="Directory for schema JSON files (default: current directory).",
 )
 def main(
-    endpoint: str,
     database: str,
     collection: str,
-    config_file: Path | None,
+    extract_config_file: Path | None,
+    connect_config_file: Path | None,
     list_databases: bool,
     list_collections: bool,
     dump_schema: bool,
@@ -330,26 +374,39 @@ def main(
     if sum(actions) > 1:
         raise click.UsageError("At most one of --list-databases, --list-collections, --dump-schema, --dump-schema-all may be set.")
     api_key = DEFAULTS["api_key"]
-    if config_file is not None:
-        config = load_config(str(config_file))
-        api_key = config["api_key"]
-        if not any(actions):
-            config["endpoint"] = endpoint
-            config["database"] = database
-            config["collection"] = collection or config["collection"]
-            run_extract(config)
-            return
+    if connect_config_file is not None:
+        if extract_config_file is not None:
+            raise click.UsageError("Cannot use -i/--connect-config-file and -f/--extract-config-file together")
+            
+        connect_config = load_config(None, str(connect_config_file))
+        endpoint = connect_config["endpoint"]
+        api_key = connect_config["api_key"]
+        
+    if extract_config_file is not None:
+        if connect_config_file is not None:
+            raise click.UsageError("Cannot use -i/--connect-config-file and -f/--extract-config-file together")
+            
+        if any(actions):
+            raise click.UsageError("actions can only be used with -i/--connect-config-file")
+            
+        config = load_config(str(extract_config_file), None)
+        run_extract(config)
+
     elif not any(actions):
         raise click.UsageError("Config file -f is required for data extract. Use --help for more available actions")
     if list_databases:
         _run_list_databases(endpoint, api_key)
         return
     if list_collections:
+        if database is None:
+            database = DEFAULTS["database"]
+            click.echo(f"WARN: Database -d db_name not provided on command line. Using default database {DEFAULTS['database']}")
         _run_list_collections(endpoint, api_key, database)
         return
     if dump_schema:
-        if not collection:
-            raise click.UsageError("--dump-schema requires -c/--collection.")
+        if not collection or not database:
+            raise click.UsageError("--dump-schema requires -c/--collection and -d/--database.")
+            return
         _run_dump_schema(endpoint, api_key, database, collection, schema_dir)
         return
     if dump_schema_all:
