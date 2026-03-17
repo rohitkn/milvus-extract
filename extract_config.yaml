@@ -3,30 +3,29 @@
 
 extract:
   # Database name (string, mandatory). Default: 'default'
-  database: default
+  database: write_test1
 
   # Collection name (string, mandatory). Default: ''
-  collection: ''
+  collection: 'doyy'
 
   # Milvus endpoint (string, mandatory). Default: https://localhost:19530
-  endpoint: https://localhost:19530
+  endpoint: http://localhost:19530
 
   # API key / token for Milvus (string, mandatory). Default: 'root:Milvus'
-  #api_key: 'root:Milvus'
-  api_key: 'redacted'
+  api_key: 'root:Milvus'
 
   # Batch size for query_iterator (int, 1–16384). Default: 2000
-  buffer: 2000
+  buffer: 1000
 
   # Scalar filter expression (string). Empty = no filtering. Default: ''
   filter_expression: ''
 
-  # Export format: 'JSON' or 'PARQUET' (string). Default: JSON
-  export_file_type: JSON
+  # Export format: 'JSON' or 'PARQUET' (string). Default: PARQUET
+  export_file_type: PARQUET
 
   # Output destination: file:///path/to/file
   # Output destination or s3://bucket/remote/path -- NOTE: bucket is not needed if cloud_storage_params.storage_root is set
-  output_location: file:///tmp/milvus_export
+  output_location: file://Users/rohitn/tmp/milvus_export
 
   # Cloud storage (S3-compatible) parameters
   cloud_storage_params:
