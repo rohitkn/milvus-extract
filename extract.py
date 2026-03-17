@@ -5,15 +5,14 @@ and writes to disk (JSON or Parquet) at file:// or s3:// locations.
 """
 
 import json
+import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any
-from grpc.aio import UsageError
-from numpy import extract
 from pymilvus.exceptions import ConnectionConfigException
 from pymilvus.exceptions import MilvusException
 import click
 import yaml
-import time
 
 
 # Defaults from spec
@@ -41,15 +40,25 @@ EXTRACT_CONFIG_ROOT = "extract"
 CONNECT_CONFIG_ROOT = "connect"
 
 
-def load_config(extract_config_path: str, connect_config_path: str | None = None) -> dict[str, Any]:
-    
+def load_config(extract_config_path: str | None, connect_config_path: str | None = None) -> dict[str, Any]:
+    """Load and validate configuration from YAML files.
+
+    Exactly one of extract_config_path or connect_config_path must be provided.
+    - connect_config_path: returns only connection credentials (endpoint + api_key).
+    - extract_config_path: returns full extraction config including output, buffer, etc.
+
+    Raises click.BadParameter if neither path is provided or if validation fails.
+    """
+    if not extract_config_path and not connect_config_path:
+        raise click.BadParameter("Either extract_config_path or connect_config_path must be provided")
+
     # Load connection credentials from connect_config_path
     if connect_config_path:
         with open(connect_config_path) as f:
             connect_data = yaml.safe_load(f)
-        if not connect_data or "connect" not in connect_data:
-            raise click.BadParameter(f"YAML must have a root key 'connect'")
-        connect_raw = connect_data["connect"] or {}
+        if not connect_data or CONNECT_CONFIG_ROOT not in connect_data:
+            raise click.BadParameter(f"YAML must have a root key '{CONNECT_CONFIG_ROOT}'")
+        connect_raw = connect_data[CONNECT_CONFIG_ROOT] or {}
         endpoint = connect_raw.get("endpoint", DEFAULTS["endpoint"])
         api_key = connect_raw.get("api_key", DEFAULTS["api_key"])
 
@@ -81,8 +90,12 @@ def load_config(extract_config_path: str, connect_config_path: str | None = None
 
         if not isinstance(database, str):
             raise click.BadParameter("database must be a string")
+        if not database:
+            raise click.BadParameter("database must not be empty")
         if not isinstance(collection, str):
             raise click.BadParameter("collection must be a string")
+        if not collection:
+            raise click.BadParameter("collection must not be empty")
         if not isinstance(endpoint, str):
             raise click.BadParameter("endpoint must be a string")
         if not isinstance(api_key, str):
@@ -149,11 +162,18 @@ def run_extract(config: dict[str, Any]) -> None:
     """Connect to Milvus, iterate with query_iterator per partition, and write output."""
     from pymilvus import MilvusClient
 
-    client = MilvusClient(
-        uri=config["endpoint"],
-        token=config["api_key"],
-        db_name=config["database"],
-    )
+    try:
+        client = MilvusClient(
+            uri=config["endpoint"],
+            token=config["api_key"],
+            db_name=config["database"],
+        )
+    except (ConnectionConfigException, MilvusException) as e:
+        click.echo(f"ERROR: Failed to connect to Milvus: {e}")
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"ERROR: Failed to connect to Milvus: {e}")
+        sys.exit(1)
 
     out = config["output_location"]
     if not out:
@@ -165,29 +185,38 @@ def run_extract(config: dict[str, Any]) -> None:
 
     # Base path for output (no scheme, no trailing slash)
     if is_s3:
-        base_path = out.replace("s3://", "").strip().rstrip("/") or "export"
+        base_path = out.removeprefix("s3://").strip().rstrip("/") or "export"
         # If first path segment is the bucket (storage_root), remove it from remote_path
         storage_root = config["cloud_storage_params"]["storage_root"]
         parts = base_path.split("/")
         if parts and parts[0] == storage_root:
             base_path = "/".join(parts[1:]).rstrip("/") or "export"
     else:
-        base_path = out.replace("file://", "/", 1).strip().rstrip("/") or "export"
+        # Strip the "file://" scheme prefix without adding an extra slash.
+        # e.g. "file:///tmp/export" -> "/tmp/export", "file://tmp/export" -> "tmp/export"
+        base_path = out.removeprefix("file://").strip().rstrip("/") or "export"
 
     # Schema required for all bulk writers (Local and Remote, JSON and PARQUET)
     from pymilvus import CollectionSchema
-    desc = client.describe_collection(collection_name=config["collection"])
-    schema = CollectionSchema.construct_from_dict(desc)
+    try:
+        desc = client.describe_collection(collection_name=config["collection"])
+        schema = CollectionSchema.construct_from_dict(desc)
+        partition_names = client.list_partitions(collection_name=config["collection"])
+    except MilvusException as e:
+        click.echo(f"ERROR: Failed to read collection '{config['collection']}': {e}")
+        sys.exit(1)
 
-    partition_names = client.list_partitions(collection_name=config["collection"])
     total_written = 0
 
     try:
         client.load_collection(collection_name=config["collection"])
     except MilvusException as e:
-        click.echo(f"ERROR: Exception raised: {e}, Please check collection name")
-        return
-    collection_dir = f"col_{config['collection']}_{time.time()}"
+        click.echo(f"ERROR: Failed to load collection '{config['collection']}': {e}")
+        sys.exit(1)
+    # Use a human-readable timestamp for the output directory name
+    # e.g. col_my_collection_20260317_153012
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    collection_dir = f"col_{config['collection']}_{timestamp}"
     remove_auto_id_field = schema.primary_field.name if schema.primary_field is not None and schema.auto_id == True and schema.primary_field.auto_id == True else None
     for partition_name in partition_names:
         partition_path = f"{base_path}/{collection_dir}/partition/{partition_name}"
@@ -223,42 +252,41 @@ def run_extract(config: dict[str, Any]) -> None:
                 file_type=file_type,
             )
 
-        offset = 0
-        while True:
-            iterator = client.query_iterator(
-                collection_name=config["collection"],
-                batch_size=buffer_size,
-                offset=offset,
-                filter=config["filter_expression"] or "",
-                output_fields=["*"],
-                partition_names=[partition_name],
-            )
-            count_this_round = 0
-            try:
-                while True:
-                    batch = iterator.next()
-                    if not batch:
-                        break
-                    for hit in batch:
-                        row = hit.to_dict() if hasattr(hit, "to_dict") else dict(hit)
-                        if remove_auto_id_field:
-                            del(row[remove_auto_id_field])
-                        writer.append_row(row)
-                        total_written += 1
-                    count_this_round += total_written
-                    
-            finally:
-                iterator.close()
-            if count_this_round < buffer_size:
-                break
-            offset += count_this_round
+        # Use a single query_iterator per partition. The iterator internally manages
+        # its own cursor/offset, so we just call next() until it returns an empty batch.
+        # No outer offset loop is needed -- that would cause double-pagination and
+        # potentially skip or duplicate rows.
+        iterator = client.query_iterator(
+            collection_name=config["collection"],
+            batch_size=buffer_size,
+            filter=config["filter_expression"] or "",
+            output_fields=["*"],
+            partition_names=[partition_name],
+        )
+        try:
+            while True:
+                batch = iterator.next()
+                if not batch:
+                    break
+                for hit in batch:
+                    row = hit.to_dict() if hasattr(hit, "to_dict") else dict(hit)
+                    # Safely remove auto-id field if present; pop() avoids KeyError
+                    # when the field is unexpectedly absent from the row dict.
+                    if remove_auto_id_field:
+                        row.pop(remove_auto_id_field, None)
+                    writer.append_row(row)
+                    total_written += 1
+        finally:
+            iterator.close()
 
+        # Always commit, even for empty partitions — this preserves the source
+        # partition structure in the output so that the destination side can
+        # recreate the same partitions on import.
         if writer:
             writer.commit()
             click.echo(f"Wrote partition {partition_name} to {partition_path} with size {writer.total_row_count}")
 
-    if total_written:
-        click.echo(f"Wrote {total_written} rows total ({export_file_type})")
+    click.echo(f"Wrote {total_written} rows total ({export_file_type})")
 
 
 def _client(endpoint: str, api_key: str, db_name: str = "default"):
@@ -267,42 +295,45 @@ def _client(endpoint: str, api_key: str, db_name: str = "default"):
 
 
 def _run_list_databases(endpoint: str, api_key: str) -> None:
-    try: 
+    try:
         client = _client(endpoint, api_key)
-    except ConnectionConfigException as e1:
-        click.echo(f"ERROR: Exception raised: {e1}, Please check endpoint and api_key")
-        return
-    except MilvusException as e2:
-        click.echo(f"ERROR: Exception raised: {e2}, Please check endpoint and api_key")
+        databases = client.list_databases()
+    except (ConnectionConfigException, MilvusException) as e:
+        click.echo(f"ERROR: {e}")
         return
     except Exception as e:
         click.echo(f"ERROR: Exception connecting to Milvus: {e}")
         return
-    for name in client.list_databases():
+    for name in databases:
         click.echo(f"Database: {name}")
 
 
 def _run_list_collections(endpoint: str, api_key: str, database: str) -> None:
-    try: 
+    try:
         client = _client(endpoint, api_key, db_name=database)
-    except ConnectionConfigException as e1:
-        click.echo(f"ERROR: Exception raised: {e1}, Please check endpoint and api_key")
-        return
-    except MilvusException as e2:
-        click.echo(f"ERROR: Exception raised: {e2}, Please check endpoint and api_key")
+        collections = client.list_collections()
+    except (ConnectionConfigException, MilvusException) as e:
+        click.echo(f"ERROR: {e}")
         return
     except Exception as e:
         click.echo(f"ERROR: Exception connecting to Milvus: {e}")
         return
-    for name in client.list_collections():
+    for name in collections:
         click.echo(f"Collection: {name}")
 
 
 def _run_dump_schema(
     endpoint: str, api_key: str, database: str, collection: str, out_dir: Path
 ) -> None:
-    client = _client(endpoint, api_key, db_name=database)
-    desc = client.describe_collection(collection_name=collection)
+    try:
+        client = _client(endpoint, api_key, db_name=database)
+        desc = client.describe_collection(collection_name=collection)
+    except (ConnectionConfigException, MilvusException) as e:
+        click.echo(f"ERROR: {e}")
+        return
+    except Exception as e:
+        click.echo(f"ERROR: Exception connecting to Milvus: {e}")
+        return
     schema_dir = out_dir / database
     schema_dir.mkdir(parents=True, exist_ok=True)
     path = schema_dir / f"{collection}__schema.json"
@@ -311,11 +342,23 @@ def _run_dump_schema(
 
 
 def _run_dump_schema_all(endpoint: str, api_key: str, database: str, out_dir: Path) -> None:
-    client = _client(endpoint, api_key, db_name=database)
+    try:
+        client = _client(endpoint, api_key, db_name=database)
+        collections = client.list_collections()
+    except (ConnectionConfigException, MilvusException) as e:
+        click.echo(f"ERROR: {e}")
+        return
+    except Exception as e:
+        click.echo(f"ERROR: Exception connecting to Milvus: {e}")
+        return
     schema_dir = out_dir / database
     schema_dir.mkdir(parents=True, exist_ok=True)
-    for name in client.list_collections():
-        desc = client.describe_collection(collection_name=name)
+    for name in collections:
+        try:
+            desc = client.describe_collection(collection_name=name)
+        except MilvusException as e:
+            click.echo(f"ERROR: Failed to describe collection '{name}': {e}, skipping")
+            continue
         path = schema_dir / f"{name}__schema.json"
         path.write_text(json.dumps(desc, indent=2, default=str))
         click.echo(f"Wrote {path}")
@@ -324,17 +367,31 @@ def _run_dump_schema_all(endpoint: str, api_key: str, database: str, out_dir: Pa
 def _run_dump_indexes(
     endpoint: str, api_key: str, database: str, collection: str, out_dir: Path
 ) -> None:
-    client = _client(endpoint, api_key, db_name=database)
-    indexes = client.list_indexes(collection_name=collection)
+    try:
+        client = _client(endpoint, api_key, db_name=database)
+        indexes = client.list_indexes(collection_name=collection)
+    except (ConnectionConfigException, MilvusException) as e:
+        click.echo(f"ERROR: {e}")
+        return
+    except Exception as e:
+        click.echo(f"ERROR: Exception connecting to Milvus: {e}")
+        return
     indexes_dir = out_dir / database
     indexes_dir.mkdir(parents=True, exist_ok=True)
+    # Collect index descriptions as dicts so we can write valid JSON.
+    # Previous code used str() which produces Python repr, not JSON.
+    # Also use write mode "w" instead of append "a" to avoid corrupted
+    # output from repeated runs.
     index_desc = []
     for index in indexes:
-        index_desc.append(str(client.describe_index(collection_name=collection, index_name=index)))
-    
-    with open(indexes_dir / f"{collection}__indexes.json", "a") as f:
-        f.write('\n'.join(index_desc))
-    click.echo(f"Wrote {indexes_dir / f"{collection}__indexes.json"}")
+        try:
+            index_desc.append(client.describe_index(collection_name=collection, index_name=index))
+        except MilvusException as e:
+            click.echo(f"ERROR: Failed to describe index '{index}': {e}, skipping")
+            continue
+    path = indexes_dir / f"{collection}__indexes.json"
+    path.write_text(json.dumps(index_desc, indent=2, default=str))
+    click.echo(f"Wrote {path}")
 
 @click.command()
 @click.option(
@@ -406,27 +463,31 @@ def main(
         raise click.UsageError(
             "At most one of --list-databases, --list-collections, --dump-schema, --dump-schema-all, --dump-indexes may be set."
         )
-    api_key = DEFAULTS["api_key"]
-    if connect_config_file is not None:
-        if extract_config_file is not None:
-            raise click.UsageError("Cannot use -i/--connect-config-file and -f/--extract-config-file together")
-            
-        connect_config = load_config(None, str(connect_config_file))
-        endpoint = connect_config["endpoint"]
-        api_key = connect_config["api_key"]
-        
+
+    # Mutual exclusion: -i and -f cannot be used together
+    if connect_config_file is not None and extract_config_file is not None:
+        raise click.UsageError("Cannot use -i/--connect-config-file and -f/--extract-config-file together")
+
+    # Data extraction mode: requires -f, no action flags allowed
     if extract_config_file is not None:
-        if connect_config_file is not None:
-            raise click.UsageError("Cannot use -i/--connect-config-file and -f/--extract-config-file together")
-            
         if any(actions):
-            raise click.UsageError("actions can only be used with -i/--connect-config-file")
-            
+            raise click.UsageError("Action flags (--list-databases, etc.) can only be used with -i/--connect-config-file")
         config = load_config(str(extract_config_file), None)
         run_extract(config)
         return
-    elif not any(actions):
+
+    # Action mode: requires -i for connection credentials and at least one action flag.
+    # Without -i, there is no endpoint to connect to, which previously caused an
+    # UnboundLocalError when reaching the action handlers below.
+    if not any(actions):
         raise click.UsageError("Config file -f is required for data extract. Use --help for more available actions")
+    if connect_config_file is None:
+        raise click.UsageError("Connection config -i is required for action flags (--list-databases, etc.)")
+
+    connect_config = load_config(None, str(connect_config_file))
+    endpoint = connect_config["endpoint"]
+    api_key = connect_config["api_key"]
+
     if list_databases:
         _run_list_databases(endpoint, api_key)
         return
