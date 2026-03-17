@@ -23,6 +23,7 @@ DEFAULTS = {
     "endpoint": "https://localhost:19530",
     "api_key": "root:Milvus",
     "buffer": 2000,
+    "max_rows_per_file": 10000,
     "filter_expression": "",
     "export_file_type": "PARQUET",
     "output_location": "",
@@ -75,6 +76,7 @@ def load_config(extract_config_path: str, connect_config_path: str | None = None
         endpoint = raw.get("endpoint", DEFAULTS["endpoint"])
         api_key = raw.get("api_key", DEFAULTS["api_key"])
         buffer = raw.get("buffer", DEFAULTS["buffer"])
+        max_rows_per_file = raw.get("max_rows_per_file", DEFAULTS["max_rows_per_file"])
         filter_expression = raw.get("filter_expression", DEFAULTS["filter_expression"])
         export_file_type = raw.get("export_file_type", DEFAULTS["export_file_type"])
         output_location = raw.get("output_location", DEFAULTS["output_location"])
@@ -96,6 +98,11 @@ def load_config(extract_config_path: str, connect_config_path: str | None = None
         if not (BUFFER_MIN <= buffer <= BUFFER_MAX):
             raise click.BadParameter(
                 f"buffer must be between {BUFFER_MIN} and {BUFFER_MAX}, got {buffer}"
+            )
+        max_rows_per_file = int(max_rows_per_file)
+        if not (1 <= max_rows_per_file <= 100000):
+            raise click.BadParameter(
+                f"max_rows_per_file must be between 1 and 100000, got {max_rows_per_file}"
             )
 
         export_file_type = str(export_file_type).upper()
@@ -138,6 +145,7 @@ def load_config(extract_config_path: str, connect_config_path: str | None = None
         "endpoint": endpoint,
         "api_key": api_key,
         "buffer": buffer,
+        "max_rows_per_file": max_rows_per_file,
         "filter_expression": filter_expression,
         "export_file_type": export_file_type,
         "output_location": output_location,
@@ -176,12 +184,13 @@ def run_extract(config: dict[str, Any]) -> None:
 
     # Schema required for all bulk writers (Local and Remote, JSON and PARQUET)
     from pymilvus import CollectionSchema
+    max_rows_per_file = config["max_rows_per_file"]
     desc = client.describe_collection(collection_name=config["collection"])
     schema = CollectionSchema.construct_from_dict(desc)
 
     partition_names = client.list_partitions(collection_name=config["collection"])
-    total_written = 0
 
+    total_fetched = 0
     try:
         client.load_collection(collection_name=config["collection"])
     except MilvusException as e:
@@ -191,6 +200,7 @@ def run_extract(config: dict[str, Any]) -> None:
     remove_auto_id_field = schema.primary_field.name if schema.primary_field is not None and schema.auto_id == True and schema.primary_field.auto_id == True else None
     for partition_name in partition_names:
         partition_path = f"{base_path}/{collection_dir}/partition/{partition_name}"
+        total_this_partition = 0
         writer = None
 
         if is_s3:
@@ -223,42 +233,37 @@ def run_extract(config: dict[str, Any]) -> None:
                 file_type=file_type,
             )
 
-        offset = 0
-        while True:
-            iterator = client.query_iterator(
-                collection_name=config["collection"],
-                batch_size=buffer_size,
-                offset=offset,
-                filter=config["filter_expression"] or "",
-                output_fields=["*"],
-                partition_names=[partition_name],
-            )
-            count_this_round = 0
-            try:
-                while True:
-                    batch = iterator.next()
-                    if not batch:
-                        break
-                    for hit in batch:
-                        row = hit.to_dict() if hasattr(hit, "to_dict") else dict(hit)
-                        if remove_auto_id_field:
-                            del(row[remove_auto_id_field])
-                        writer.append_row(row)
-                        total_written += 1
-                    count_this_round += total_written
-                    
-            finally:
-                iterator.close()
-            if count_this_round < buffer_size:
-                break
-            offset += count_this_round
-
+        click.echo(f"Loading data for partition: {partition_name}")
+        iterator = client.query_iterator(
+            collection_name=config["collection"],
+            batch_size=buffer_size,
+            filter=config["filter_expression"] or "",
+            output_fields=["*"],
+            partition_names=[partition_name],
+        )
+        try:
+            while True:
+                batch = iterator.next()
+                if not batch:
+                    break
+                for hit in batch:
+                    row = hit.to_dict() if hasattr(hit, "to_dict") else dict(hit)
+                    if remove_auto_id_field:
+                        del(row[remove_auto_id_field])
+                    writer.append_row(row)
+                    total_fetched += 1
+                    total_this_partition += 1
+                    if total_this_partition % max_rows_per_file == 0:
+                        writer.commit()
+                        click.echo(f"Wrote {max_rows_per_file} to partition {partition_name} in {partition_path}. Total row count {writer.total_row_count}")
+        finally:
+            iterator.close()
         if writer:
             writer.commit()
             click.echo(f"Wrote partition {partition_name} to {partition_path} with size {writer.total_row_count}")
 
-    if total_written:
-        click.echo(f"Wrote {total_written} rows total ({export_file_type})")
+    if total_fetched:
+        click.echo(f"Wrote {total_fetched} rows total ({export_file_type})")
 
 
 def _client(endpoint: str, api_key: str, db_name: str = "default"):
