@@ -15,13 +15,15 @@ COLLECTION_NAME = "doyy"
 DATASET_NAME = "DoyyingFace/github-embeddings-doy"
 
 # Partition names by comment_length range (inclusive min, inclusive max)
+# Range starts at 0 so that empty comments (length 0) go into the first partition
+# instead of falling through to the catch-all partition.
 PARTITION_RANGES = [
-    (1, 50, "c_1_50"),
+    (0, 50, "c_0_50"),
     (51, 100, "c_51_100"),
     (101, 500, "c_101_500"),
     (501, 1000, "c_501_1000"),
 ]
-PARTITION_GT_1000 = "c_10001"
+PARTITION_GT_1000 = "c_gt_1000"
 
 VARCHAR_LONG = 65535
 VARCHAR_SHORT = 2048
@@ -108,10 +110,16 @@ def main():
         client.create_database(db_name=DB_NAME)
     client.using_database(DB_NAME)
 
-    # 2. Create collection with schema and indexes
+    # 2. Create collection with schema and indexes.
+    # WARNING: This drops the existing collection and all its data without confirmation.
+    # Guard with a user prompt to prevent accidental data loss on repeated runs.
     schema = _create_schema()
     index_params = _create_index_params()
     if client.has_collection(COLLECTION_NAME):
+        answer = input(f"Collection '{COLLECTION_NAME}' already exists. Drop and recreate? [y/N] ")
+        if answer.strip().lower() != "y":
+            print("Aborted.")
+            return
         client.drop_collection(COLLECTION_NAME)
     client.create_collection(
         collection_name=COLLECTION_NAME,
@@ -124,10 +132,28 @@ def main():
         client.create_partition(collection_name=COLLECTION_NAME, partition_name=name)
     client.create_partition(collection_name=COLLECTION_NAME, partition_name=PARTITION_GT_1000)
 
-    # 4. Load dataset and bucket by partition
+    # 4. Stream dataset and insert in batches per partition.
+    # Instead of loading all rows into memory (which can OOM on large datasets),
+    # we accumulate rows per partition up to batch_size, then flush immediately.
     ds = load_dataset(DATASET_NAME, split="train", trust_remote_code=True)
-    by_partition: dict[str, list[dict]] = defaultdict(list)
     batch_size = 256
+
+    # Buffers: partition_name -> list of row dicts (max batch_size before flush)
+    buffers: dict[str, list[dict]] = defaultdict(list)
+    inserted_counts: dict[str, int] = defaultdict(int)
+
+    def _flush(part_name: str) -> None:
+        """Insert buffered rows for a partition and clear the buffer."""
+        rows = buffers[part_name]
+        if not rows:
+            return
+        client.insert(
+            collection_name=COLLECTION_NAME,
+            data=rows,
+            partition_name=part_name,
+        )
+        inserted_counts[part_name] += len(rows)
+        buffers[part_name] = []
 
     for i, example in enumerate(ds):
         try:
@@ -136,20 +162,17 @@ def main():
             print(f"Skip row {i}: {e}")
             continue
         part = _partition_name(row["comment_length"])
-        by_partition[part].append(row)
+        buffers[part].append(row)
+        # Flush when the buffer for this partition reaches batch_size
+        if len(buffers[part]) >= batch_size:
+            _flush(part)
 
-    # 5. Insert into each partition
-    for part_name, rows in by_partition.items():
-        if not rows:
-            continue
-        for start in range(0, len(rows), batch_size):
-            chunk = rows[start : start + batch_size]
-            client.insert(
-                collection_name=COLLECTION_NAME,
-                data=chunk,
-                partition_name=part_name,
-            )
-        print(f"Inserted {len(rows)} rows into partition {part_name}")
+    # 5. Flush any remaining rows in all partition buffers
+    for part_name in list(buffers.keys()):
+        _flush(part_name)
+
+    for part_name, count in inserted_counts.items():
+        print(f"Inserted {count} rows into partition {part_name}")
 
     print("Done.")
 
