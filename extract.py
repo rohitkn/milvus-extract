@@ -13,6 +13,7 @@ from pymilvus.exceptions import ConnectionConfigException
 from pymilvus.exceptions import MilvusException
 import click
 import yaml
+import time
 
 
 # Defaults from spec
@@ -181,8 +182,14 @@ def run_extract(config: dict[str, Any]) -> None:
     partition_names = client.list_partitions(collection_name=config["collection"])
     total_written = 0
 
+    try:
+        client.load_collection(collection_name=config["collection"])
+    except MilvusException as e:
+        click.echo(f"ERROR: Exception raised: {e}, Please check collection name")
+        return
+    collection_dir = f"col_{config['collection']}_{time.time()}"
+    remove_auto_id_field = schema.primary_field.name if schema.primary_field is not None and schema.auto_id == True and schema.primary_field.auto_id == True else None
     for partition_name in partition_names:
-        collection_dir = f"col_{config['collection']}"
         partition_path = f"{base_path}/{collection_dir}/partition/{partition_name}"
         writer = None
 
@@ -234,9 +241,12 @@ def run_extract(config: dict[str, Any]) -> None:
                         break
                     for hit in batch:
                         row = hit.to_dict() if hasattr(hit, "to_dict") else dict(hit)
+                        if remove_auto_id_field:
+                            del(row[remove_auto_id_field])
                         writer.append_row(row)
                         total_written += 1
-                    count_this_round += len(batch)
+                    count_this_round += total_written
+                    
             finally:
                 iterator.close()
             if count_this_round < buffer_size:
@@ -245,7 +255,7 @@ def run_extract(config: dict[str, Any]) -> None:
 
         if writer:
             writer.commit()
-            click.echo(f"Wrote partition {partition_name} to {partition_path}")
+            click.echo(f"Wrote partition {partition_name} to {partition_path} with size {writer.total_row_count}")
 
     if total_written:
         click.echo(f"Wrote {total_written} rows total ({export_file_type})")
@@ -414,7 +424,7 @@ def main(
             
         config = load_config(str(extract_config_file), None)
         run_extract(config)
-
+        return
     elif not any(actions):
         raise click.UsageError("Config file -f is required for data extract. Use --help for more available actions")
     if list_databases:
