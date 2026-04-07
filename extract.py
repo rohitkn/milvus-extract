@@ -303,6 +303,18 @@ def _run_list_collections(endpoint: str, api_key: str, database: str) -> None:
         click.echo(f"Collection: {name}")
 
 
+def _write_collection_indexes_json(client: Any, collection: str, schema_dir: Path) -> None:
+    index_names = client.list_indexes(collection_name=collection)
+    index_descs: list[Any] = []
+    for index_name in index_names:
+        index_descs.append(
+            client.describe_index(collection_name=collection, index_name=index_name)
+        )
+    path = schema_dir / f"{collection}_indexes.json"
+    path.write_text(json.dumps(index_descs, indent=2, default=str))
+    click.echo(f"Wrote {path}")
+
+
 def _run_dump_schema(
     endpoint: str, api_key: str, database: str, collection: str, out_dir: Path
 ) -> None:
@@ -319,8 +331,7 @@ def _run_dump_schema(
         path = schema_dir / f"{collection}__{partition}__part.json"
         path.write_text(json.dumps(partition_desc, indent=2, default=str))
         click.echo(f"Wrote {path}")
-    
-    
+    _write_collection_indexes_json(client, collection, schema_dir)
 
 
 def _run_dump_schema_all(endpoint: str, api_key: str, database: str, out_dir: Path) -> None:
@@ -338,6 +349,7 @@ def _run_dump_schema_all(endpoint: str, api_key: str, database: str, out_dir: Pa
             path = schema_dir / f"{name}__{partition}__part.json"
             path.write_text(json.dumps(partition_desc, indent=2, default=str))
             click.echo(f"Wrote {path}")
+        _write_collection_indexes_json(client, name, schema_dir)
 
 
 def _run_dump_indexes(
