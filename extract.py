@@ -313,6 +313,14 @@ def _run_dump_schema(
     path = schema_dir / f"{collection}__schema.json"
     path.write_text(json.dumps(desc, indent=2, default=str))
     click.echo(f"Wrote {path}")
+    list_of_partitions = client.list_partitions(collection_name=collection)
+    for partition in list_of_partitions:
+        partition_desc = client.get_partition_stats(collection_name=collection, partition_name=partition)
+        path = schema_dir / f"{collection}__{partition}__part.json"
+        path.write_text(json.dumps(partition_desc, indent=2, default=str))
+        click.echo(f"Wrote {path}")
+    
+    
 
 
 def _run_dump_schema_all(endpoint: str, api_key: str, database: str, out_dir: Path) -> None:
@@ -324,6 +332,12 @@ def _run_dump_schema_all(endpoint: str, api_key: str, database: str, out_dir: Pa
         path = schema_dir / f"{name}__schema.json"
         path.write_text(json.dumps(desc, indent=2, default=str))
         click.echo(f"Wrote {path}")
+        list_of_partitions = client.list_partitions(collection_name=name)
+        for partition in list_of_partitions:
+            partition_desc = client.get_partition_stats(collection_name=name, partition_name=partition)
+            path = schema_dir / f"{name}__{partition}__part.json"
+            path.write_text(json.dumps(partition_desc, indent=2, default=str))
+            click.echo(f"Wrote {path}")
 
 
 def _run_dump_indexes(
