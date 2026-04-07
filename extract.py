@@ -310,7 +310,7 @@ def _write_collection_indexes_json(client: Any, collection: str, schema_dir: Pat
         index_descs.append(
             client.describe_index(collection_name=collection, index_name=index_name)
         )
-    path = schema_dir / f"{collection}_indexes.json"
+    path = schema_dir / f"{collection}__indexes.json"
     path.write_text(json.dumps(index_descs, indent=2, default=str))
     click.echo(f"Wrote {path}")
 
