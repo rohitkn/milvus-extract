@@ -86,10 +86,15 @@ def _coerce_index_scalar(v: Any) -> Any:
     return v
 
 
-def _append_index_entry_to_params(index_params: Any, entry: dict[str, Any]) -> None:
+def _append_index_entry_to_params(
+    index_params: Any, entry: dict[str, Any], *, preserve_index_type: bool
+) -> None:
     field_name = entry["field_name"]
-    index_type = entry["index_type"]
-    index_name = entry.get("index_name") or ""
+    if preserve_index_type:
+        index_type = entry.get("index_type")
+    else:
+        index_type = "AUTOINDEX"
+    index_name = entry.get("index_name") or field_name + "_index"
     metric_type = entry.get("metric_type")
     if metric_type is None:
         metric_type = ""
@@ -114,7 +119,11 @@ def _append_index_entry_to_params(index_params: Any, entry: dict[str, Any]) -> N
 
 
 def _restore_collection_indexes(
-    client: MilvusClient, collection: str, indexes_path: Path
+    client: MilvusClient,
+    collection: str,
+    indexes_path: Path,
+    *,
+    preserve_index_type: bool,
 ) -> None:
     raw = json.loads(indexes_path.read_text())
     if not isinstance(raw, list):
@@ -133,7 +142,9 @@ def _restore_collection_indexes(
                 f"Index {iname!r} on collection {collection!r} already exists, skipping"
             )
             continue
-        _append_index_entry_to_params(index_params, item)
+        _append_index_entry_to_params(
+            index_params, item, preserve_index_type=preserve_index_type
+        )
         to_add = True
     if to_add:
         client.create_index(
@@ -143,7 +154,11 @@ def _restore_collection_indexes(
 
 
 def _restore_collections(
-    client: MilvusClient, database_dir: Path, db_name: str
+    client: MilvusClient,
+    database_dir: Path,
+    db_name: str,
+    ignore_default_partition: bool,
+    preserve_index_type: bool,
 ) -> None:
     json_files = [p for p in database_dir.iterdir() if p.is_file() and p.suffix == ".json"]
     schema_paths = sorted(
@@ -195,7 +210,7 @@ def _restore_collections(
                 f"(known collections: {collection_names})"
             )
         coll_name, partition_name = parsed
-        if partition_name == "_default":
+        if ignore_default_partition and partition_name == "_default":
             click.echo(
                 f"Skipping partition {partition_name!r} on {coll_name!r} (implicit default)"
             )
@@ -228,7 +243,12 @@ def _restore_collections(
                 f"WARN: Collection {coll_name!r} missing; skipping indexes from {idx_path.name}"
             )
             continue
-        _restore_collection_indexes(client, coll_name, idx_path)
+        _restore_collection_indexes(
+            client,
+            coll_name,
+            idx_path,
+            preserve_index_type=preserve_index_type,
+        )
 
 
 @click.command()
@@ -247,21 +267,42 @@ def _restore_collections(
     help="Milvus connection YAML (root key 'connect': endpoint, api_key).",
 )
 @click.option(
-    "--restore-collections",
+    "--restore-collections-meta",
+    "restore_collections_meta",
     is_flag=True,
     help="Create database, collections, partitions, and indexes from JSON in --database-dir.",
 )
+@click.option(
+    "--ignore-default-partition",
+    is_flag=True,
+    help="Skip restoring the _default partition (Milvus already has an implicit default).",
+)
+@click.option(
+    "--preserve-index-type",
+    is_flag=True,
+    help="Use index_type from dumped JSON; otherwise use AUTOINDEX when creating indexes.",
+)
 def main(
-    database_dir: Path, connect_config_file: Path, restore_collections: bool
+    database_dir: Path,
+    connect_config_file: Path,
+    restore_collections_meta: bool,
+    ignore_default_partition: bool,
+    preserve_index_type: bool,
 ) -> None:
-    """Restore Milvus metadata from dumped JSON (use --restore-collections)."""
-    if not restore_collections:
-        raise click.UsageError("Specify --restore-collections to run restore.")
+    """Restore Milvus metadata from dumped JSON (use --restore-collections-meta)."""
+    if not restore_collections_meta:
+        raise click.UsageError("Specify --restore-collections-meta to run restore.")
 
     uri, token = _load_connect_config(connect_config_file)
     client = MilvusClient(uri=uri, token=token)
     db_name = database_dir.name
-    _restore_collections(client, database_dir, db_name)
+    _restore_collections(
+        client,
+        database_dir,
+        db_name,
+        ignore_default_partition=ignore_default_partition,
+        preserve_index_type=preserve_index_type,
+    )
 
 
 if __name__ == "__main__":
