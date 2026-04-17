@@ -1,5 +1,16 @@
 # milvus-extract
 
+Tools for **extracting** Milvus collection data to disk and **restoring** database metadata from JSON dumps produced by the extract tool.
+
+- **`extract.py`** — Pulls data from a Milvus endpoint via `query_iterator` and writes to disk (JSON or Parquet) at `file://` or `s3://` locations. Can also list databases/collections and dump schemas and indexes to JSON.
+- **`restore.py`** — Recreates database, collections, partitions, and indexes from JSON layout: `db_dir/<collection>__schema.json`, `<collection>__<partition>__part.json`, and `<collection>__indexes.json`.
+
+## Setup
+
+```bash
+pip install -r requirements.txt
+```
+
 ## `extract.py --help`
 
 ```
@@ -33,14 +44,18 @@ Options:
 ```
 Usage: restore.py [OPTIONS]
 
-  Restore Milvus metadata from dumped JSON (use --restore-collections).
+  Restore Milvus metadata from dumped JSON (use --restore-collections-meta).
 
 Options:
-  --database-dir DIRECTORY  Directory named like the target Milvus database
-                            (basename = db name).  [required]
-  -i PATH                   Milvus connection YAML (root key 'connect':
-                            endpoint, api_key).  [required]
-  --restore-collections     Create database, collections, partitions, and
-                            indexes from JSON in --database-dir.
-  --help                    Show this message and exit.
+  --database-dir DIRECTORY    Directory named like the target Milvus database
+                              (basename = db name).  [required]
+  -i PATH                     Milvus connection YAML (root key 'connect':
+                              endpoint, api_key).  [required]
+  --restore-collections-meta  Create database, collections, partitions, and
+                              indexes from JSON in --database-dir.
+  --ignore-default-partition  Skip restoring the _default partition (Milvus
+                              already has an implicit default).
+  --preserve-index-type       Use index_type from dumped JSON; otherwise use
+                              AUTOINDEX when creating indexes.
+  --help                      Show this message and exit.
 ```
