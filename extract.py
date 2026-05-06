@@ -41,6 +41,11 @@ BUFFER_MIN, BUFFER_MAX = 1, 16384
 EXTRACT_CONFIG_ROOT = "extract"
 CONNECT_CONFIG_ROOT = "connect"
 
+def validate_singleton(ctx, param, value):
+    # 'value' will be a tuple because multiple=True
+    if len(value) > 1:
+        raise click.UsageError(f"Option {param.opts[0]} '{param.name}' is allowed only once.")
+    return value[0] if value else None
 
 def load_config(extract_config_path: str, connect_config_path: str | None = None) -> dict[str, Any]:
     
@@ -196,10 +201,10 @@ def run_extract(config: dict[str, Any]) -> None:
     except MilvusException as e:
         click.echo(f"ERROR: Exception raised: {e}, Please check collection name")
         return
-    collection_dir = f"col_{config['collection']}_{time.time()}"
+    collection_dir = f"col_{config['collection']}__{time.time()}"
     remove_auto_id_field = schema.primary_field.name if schema.primary_field is not None and schema.auto_id == True and schema.primary_field.auto_id == True else None
     for partition_name in partition_names:
-        partition_path = f"{base_path}/{collection_dir}/partition/{partition_name}"
+        partition_path = f"{base_path}/{config['database']}/{collection_dir}/partition/{partition_name}"
         total_this_partition = 0
         writer = None
 
@@ -387,7 +392,9 @@ def _run_dump_indexes(
     "extract_config_file",
     type=click.Path(exists=True, path_type=Path),
     default=None,
-    help="Path to YAML config file (required for extract).",
+    help="Path to YAML config file (required for extract -> parquet data files only).",
+    callback=validate_singleton,
+    multiple=True
 )
 @click.option(
     "-i",
@@ -395,6 +402,8 @@ def _run_dump_indexes(
     type=click.Path(exists=True, path_type=Path),
     default=None,
     help="Path to YAML Milvus connection credentials file (for actions other than data extract)",
+    callback=validate_singleton,
+    multiple=True
 )
 @click.option("--list-databases", is_flag=True, help="Print all database names.")
 @click.option("--list-collections", is_flag=True, help="Print all collection names for the given database.")
