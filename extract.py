@@ -78,6 +78,8 @@ def load_config(extract_config_path: str, connect_config_path: str | None = None
         raw = data[EXTRACT_CONFIG_ROOT] or {}
         database = raw.get("database", DEFAULTS["database"])
         collection = raw.get("collection", DEFAULTS["collection"])
+        if collection is None:
+            collection = ""
         endpoint = raw.get("endpoint", DEFAULTS["endpoint"])
         api_key = raw.get("api_key", DEFAULTS["api_key"])
         buffer = raw.get("buffer", DEFAULTS["buffer"])
@@ -172,6 +174,16 @@ def run_extract(config: dict[str, Any]) -> None:
     if not out:
         raise click.BadParameter("output_location is mandatory for export")
 
+    coll_cfg = config.get("collection")
+    if coll_cfg is None or (isinstance(coll_cfg, str) and not coll_cfg.strip()):
+        collections_to_extract = client.list_collections()
+        if not collections_to_extract:
+            click.echo("No collections in database; nothing to export.")
+            return
+        click.echo(f"Exporting all {len(collections_to_extract)} collection(s): {', '.join(collections_to_extract)}")
+    else:
+        collections_to_extract = [coll_cfg]
+
     is_s3 = out.strip().startswith("s3://")
     buffer_size = config["buffer"]
     export_file_type = config["export_file_type"]
@@ -187,88 +199,94 @@ def run_extract(config: dict[str, Any]) -> None:
     else:
         base_path = out.replace("file://", "/", 1).strip().rstrip("/") or "export"
 
-    # Schema required for all bulk writers (Local and Remote, JSON and PARQUET)
     from pymilvus import CollectionSchema
     max_rows_per_file = config["max_rows_per_file"]
-    desc = client.describe_collection(collection_name=config["collection"])
-    schema = CollectionSchema.construct_from_dict(desc)
+    total_fetched_all = 0
 
-    partition_names = client.list_partitions(collection_name=config["collection"])
+    for collection_name in collections_to_extract:
+        desc = client.describe_collection(collection_name=collection_name)
+        schema = CollectionSchema.construct_from_dict(desc)
 
-    total_fetched = 0
-    try:
-        client.load_collection(collection_name=config["collection"])
-    except MilvusException as e:
-        click.echo(f"ERROR: Exception raised: {e}, Please check collection name")
-        return
-    collection_dir = f"col_{config['collection']}__{time.time()}"
-    remove_auto_id_field = schema.primary_field.name if schema.primary_field is not None and schema.auto_id == True and schema.primary_field.auto_id == True else None
-    for partition_name in partition_names:
-        partition_path = f"{base_path}/{config['database']}/{collection_dir}/partition/{partition_name}"
-        total_this_partition = 0
-        writer = None
+        partition_names = client.list_partitions(collection_name=collection_name)
 
-        if is_s3:
-            from pymilvus.bulk_writer import RemoteBulkWriter, BulkFileType
-            csp = config["cloud_storage_params"]
-            connect_param = RemoteBulkWriter.S3ConnectParam(
-                bucket_name=csp["storage_root"],
-                endpoint=csp["endpoint"],
-                access_key=csp["access_key"],
-                secret_key=csp["secret_key"],
-            )
-            file_type = (
-                BulkFileType.JSON if export_file_type == "JSON" else BulkFileType.PARQUET
-            )
-            writer = RemoteBulkWriter(
-                schema=schema,
-                remote_path=partition_path,
-                connect_param=connect_param,
-                file_type=file_type,
-            )
-        else:
-            from pymilvus.bulk_writer import LocalBulkWriter, BulkFileType
-            Path(partition_path).mkdir(parents=True, exist_ok=True)
-            file_type = (
-                BulkFileType.JSON if export_file_type == "JSON" else BulkFileType.PARQUET
-            )
-            writer = LocalBulkWriter(
-                schema=schema,
-                local_path=partition_path,
-                file_type=file_type,
-            )
-
-        click.echo(f"Loading data for partition: {partition_name}")
-        iterator = client.query_iterator(
-            collection_name=config["collection"],
-            batch_size=buffer_size,
-            filter=config["filter_expression"] or "",
-            output_fields=["*"],
-            partition_names=[partition_name],
-        )
+        total_fetched = 0
         try:
-            while True:
-                batch = iterator.next()
-                if not batch:
-                    break
-                for hit in batch:
-                    row = hit.to_dict() if hasattr(hit, "to_dict") else dict(hit)
-                    if remove_auto_id_field:
-                        del(row[remove_auto_id_field])
-                    writer.append_row(row)
-                    total_fetched += 1
-                    total_this_partition += 1
-                    if total_this_partition % max_rows_per_file == 0:
-                        writer.commit()
-                        click.echo(f"Wrote {max_rows_per_file} to partition {partition_name} in {partition_path}. Total row count {writer.total_row_count}")
-        finally:
-            iterator.close()
-        if writer:
-            writer.commit()
-            click.echo(f"Wrote partition {partition_name} to {partition_path} with size {writer.total_row_count}")
+            client.load_collection(collection_name=collection_name)
+        except MilvusException as e:
+            click.echo(f"ERROR: Exception raised: {e}, Please check collection name ({collection_name})")
+            continue
+        collection_dir = f"col_{collection_name}__{time.time()}"
+        remove_auto_id_field = schema.primary_field.name if schema.primary_field is not None and schema.auto_id == True and schema.primary_field.auto_id == True else None
+        for partition_name in partition_names:
+            partition_path = f"{base_path}/{config['database']}/{collection_dir}/partition/{partition_name}"
+            total_this_partition = 0
+            writer = None
 
-    if total_fetched:
-        click.echo(f"Wrote {total_fetched} rows total ({export_file_type})")
+            if is_s3:
+                from pymilvus.bulk_writer import RemoteBulkWriter, BulkFileType
+                csp = config["cloud_storage_params"]
+                connect_param = RemoteBulkWriter.S3ConnectParam(
+                    bucket_name=csp["storage_root"],
+                    endpoint=csp["endpoint"],
+                    access_key=csp["access_key"],
+                    secret_key=csp["secret_key"],
+                )
+                file_type = (
+                    BulkFileType.JSON if export_file_type == "JSON" else BulkFileType.PARQUET
+                )
+                writer = RemoteBulkWriter(
+                    schema=schema,
+                    remote_path=partition_path,
+                    connect_param=connect_param,
+                    file_type=file_type,
+                )
+            else:
+                from pymilvus.bulk_writer import LocalBulkWriter, BulkFileType
+                Path(partition_path).mkdir(parents=True, exist_ok=True)
+                file_type = (
+                    BulkFileType.JSON if export_file_type == "JSON" else BulkFileType.PARQUET
+                )
+                writer = LocalBulkWriter(
+                    schema=schema,
+                    local_path=partition_path,
+                    file_type=file_type,
+                )
+
+            click.echo(f"[{collection_name}] Loading data for partition: {partition_name}")
+            iterator = client.query_iterator(
+                collection_name=collection_name,
+                batch_size=buffer_size,
+                filter=config["filter_expression"] or "",
+                output_fields=["*"],
+                partition_names=[partition_name],
+            )
+            try:
+                while True:
+                    batch = iterator.next()
+                    if not batch:
+                        break
+                    for hit in batch:
+                        row = hit.to_dict() if hasattr(hit, "to_dict") else dict(hit)
+                        if remove_auto_id_field:
+                            del(row[remove_auto_id_field])
+                        writer.append_row(row)
+                        total_fetched += 1
+                        total_this_partition += 1
+                        if total_this_partition % max_rows_per_file == 0:
+                            writer.commit()
+                            click.echo(f"Wrote {max_rows_per_file} to partition {partition_name} in {partition_path}. Total row count {writer.total_row_count}")
+            finally:
+                iterator.close()
+            if writer:
+                writer.commit()
+                click.echo(f"Wrote partition {partition_name} to {partition_path} with size {writer.total_row_count}")
+
+        total_fetched_all += total_fetched
+        if total_fetched:
+            click.echo(f"[{collection_name}] Wrote {total_fetched} rows ({export_file_type})")
+
+    if total_fetched_all:
+        click.echo(f"Wrote {total_fetched_all} rows total ({export_file_type})")
 
 
 def _client(endpoint: str, api_key: str, db_name: str = "default"):
