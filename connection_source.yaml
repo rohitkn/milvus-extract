@@ -5,5 +5,4 @@ connect:
   # Milvus endpoint (string, mandatory). Default: https://localhost:19530
   endpoint: http://localhost:19530
   
-  # API key / token for Milvus (string, mandatory). Default: 'root:Milvus'
-  api_key: 'root:Milvus'
+  # API key / token for Milvus (string, mandatory). Default: 'root:Milvus'; will be read from .env file.

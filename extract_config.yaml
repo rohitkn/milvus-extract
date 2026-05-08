@@ -3,22 +3,21 @@
 
 extract:
   # Database name (string, mandatory). Default: 'default'
-  database: write_test1
+  database: milvus_image_db
 
   # Collection name (string, mandatory). Default: ''
-  collection: 'doyy'
+  collection: 'prod_ann5'
 
   # Milvus endpoint (string, mandatory). Default: https://localhost:19530
   endpoint: http://localhost:19530
 
-  # API key / token for Milvus (string, mandatory). Default: 'root:Milvus'
-  api_key: 'root:Milvus'
+  # API key / token for Milvus (string, mandatory). Will be read from .env file.
 
   # Batch size for query_iterator (int, 1–16384). Default: 2000
   buffer: 200
 
   # Maximum rows per file (int) created by the writer. Default: 10000
-  max_rows_per_file: 500
+  max_rows_per_file: 2000
 
   # Scalar filter expression (string). Empty = no filtering. Default: ''
   filter_expression: ''
@@ -28,8 +27,8 @@ extract:
 
   # Output destination: file:///path/to/file
   # Output destination or s3://bucket/remote/path -- NOTE: bucket is not needed if cloud_storage_params.storage_root is set
-  #output_location: file://Users/rohitn/tmp/milvus_export
-  output_location: s3://a-bucket/milvus_export
+  output_location: file://Users/rohitn/tmp/milvus_export
+  #output_location: s3://a-bucket/milvus_export
 
   # Cloud storage (S3-compatible) parameters
   cloud_storage_params:

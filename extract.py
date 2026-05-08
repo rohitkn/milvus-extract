@@ -14,6 +14,8 @@ from pymilvus.exceptions import MilvusException
 import click
 import yaml
 import time
+import os
+from dotenv import load_dotenv
 
 
 # Defaults from spec
@@ -57,15 +59,11 @@ def load_config(extract_config_path: str, connect_config_path: str | None = None
             raise click.BadParameter(f"YAML must have a root key 'connect'")
         connect_raw = connect_data["connect"] or {}
         endpoint = connect_raw.get("endpoint", DEFAULTS["endpoint"])
-        api_key = connect_raw.get("api_key", DEFAULTS["api_key"])
 
         if not isinstance(endpoint, str):
             raise click.BadParameter("endpoint must be a string")
-        if not isinstance(api_key, str):
-            raise click.BadParameter("api_key must be a string")
         return {
         "endpoint": endpoint,
-        "api_key": api_key
         }
 
     # Apply defaults and type checks
@@ -81,7 +79,6 @@ def load_config(extract_config_path: str, connect_config_path: str | None = None
         if collection is None:
             collection = ""
         endpoint = raw.get("endpoint", DEFAULTS["endpoint"])
-        api_key = raw.get("api_key", DEFAULTS["api_key"])
         buffer = raw.get("buffer", DEFAULTS["buffer"])
         max_rows_per_file = raw.get("max_rows_per_file", DEFAULTS["max_rows_per_file"])
         filter_expression = raw.get("filter_expression", DEFAULTS["filter_expression"])
@@ -94,8 +91,6 @@ def load_config(extract_config_path: str, connect_config_path: str | None = None
             raise click.BadParameter("collection must be a string")
         if not isinstance(endpoint, str):
             raise click.BadParameter("endpoint must be a string")
-        if not isinstance(api_key, str):
-            raise click.BadParameter("api_key must be a string")
         if not isinstance(filter_expression, str):
             raise click.BadParameter("filter_expression must be a string")
         if not isinstance(output_location, str):
@@ -150,7 +145,6 @@ def load_config(extract_config_path: str, connect_config_path: str | None = None
         "database": database,
         "collection": collection,
         "endpoint": endpoint,
-        "api_key": api_key,
         "buffer": buffer,
         "max_rows_per_file": max_rows_per_file,
         "filter_expression": filter_expression,
@@ -163,10 +157,11 @@ def load_config(extract_config_path: str, connect_config_path: str | None = None
 def run_extract(config: dict[str, Any]) -> None:
     """Connect to Milvus, iterate with query_iterator per partition, and write output."""
     from pymilvus import MilvusClient
-
+    load_dotenv()
+    api_token = os.getenv("SOURCE_API_TOKEN", DEFAULTS["api_key"])
     client = MilvusClient(
         uri=config["endpoint"],
-        token=config["api_key"],
+        token=api_token,
         db_name=config["database"],
     )
 
@@ -464,14 +459,15 @@ def main(
         raise click.UsageError(
             "At most one of --list-databases, --list-collections, --dump-schema, --dump-schema-all, --dump-indexes may be set."
         )
-    api_key = DEFAULTS["api_key"]
+    load_dotenv()
+    api_key = os.getenv("API_TOKEN", DEFAULTS["api_key"])
+    endpoint = DEFAULTS["endpoint"]
     if connect_config_file is not None:
         if extract_config_file is not None:
             raise click.UsageError("Cannot use -i/--connect-config-file and -f/--extract-config-file together")
             
         connect_config = load_config(None, str(connect_config_file))
         endpoint = connect_config["endpoint"]
-        api_key = connect_config["api_key"]
         
     if extract_config_file is not None:
         if connect_config_file is not None:
