@@ -33,8 +33,6 @@ DEFAULTS = {
 
 CLOUD_STORAGE_DEFAULTS = {
     "endpoint": "localhost:9000",
-    "access_key": "",
-    "secret_key": "",
     "storage_root": "a-bucket",
 }
 
@@ -42,6 +40,23 @@ EXPORT_TYPES = ("JSON", "PARQUET")
 BUFFER_MIN, BUFFER_MAX = 1, 16384
 EXTRACT_CONFIG_ROOT = "extract"
 CONNECT_CONFIG_ROOT = "connect"
+
+
+def _cloud_storage_keys_from_env() -> tuple[str, str]:
+    """S3/MinIO credentials from .env only (not from extract YAML)."""
+    load_dotenv()
+    access_key = (
+        os.getenv("CLOUD_STORAGE_ACCESS_KEY")
+        or os.getenv("AWS_ACCESS_KEY_ID")
+        or ""
+    )
+    secret_key = (
+        os.getenv("CLOUD_STORAGE_SECRET_KEY")
+        or os.getenv("AWS_SECRET_ACCESS_KEY")
+        or ""
+    )
+    return access_key, secret_key
+
 
 def validate_singleton(ctx, param, value):
     # 'value' will be a tuple because multiple=True
@@ -63,7 +78,7 @@ def load_config(extract_config_path: str, connect_config_path: str | None = None
         if not isinstance(endpoint, str):
             raise click.BadParameter("endpoint must be a string")
         return {
-        "endpoint": endpoint,
+            "endpoint": endpoint,
         }
 
     # Apply defaults and type checks
@@ -115,22 +130,23 @@ def load_config(extract_config_path: str, connect_config_path: str | None = None
 
         raw_csp = raw.get("cloud_storage_params") or {}
         csp_endpoint = raw_csp.get("endpoint", CLOUD_STORAGE_DEFAULTS["endpoint"])
-        csp_access_key = raw_csp.get("access_key", CLOUD_STORAGE_DEFAULTS["access_key"])
-        csp_secret_key = raw_csp.get("secret_key", CLOUD_STORAGE_DEFAULTS["secret_key"])
         csp_storage_root = raw_csp.get("storage_root", CLOUD_STORAGE_DEFAULTS["storage_root"])
+        csp_access_key, csp_secret_key = _cloud_storage_keys_from_env()
         if not isinstance(csp_endpoint, str):
             raise click.BadParameter("cloud_storage_params.endpoint must be a string")
-        if not isinstance(csp_access_key, str):
-            raise click.BadParameter("cloud_storage_params.access_key must be a string")
-        if not isinstance(csp_secret_key, str):
-            raise click.BadParameter("cloud_storage_params.secret_key must be a string")
         if not isinstance(csp_storage_root, str):
             raise click.BadParameter("cloud_storage_params.storage_root must be a string")
         if output_location.strip().startswith("s3://"):
             if not csp_access_key:
-                raise click.BadParameter("cloud_storage_params.access_key is mandatory for s3:// output")
+                raise click.BadParameter(
+                    "S3 output requires access key in .env: set CLOUD_STORAGE_ACCESS_KEY "
+                    "or AWS_ACCESS_KEY_ID"
+                )
             if not csp_secret_key:
-                raise click.BadParameter("cloud_storage_params.secret_key is mandatory for s3:// output")
+                raise click.BadParameter(
+                    "S3 output requires secret key in .env: set CLOUD_STORAGE_SECRET_KEY "
+                    "or AWS_SECRET_ACCESS_KEY"
+                )
             if not csp_storage_root:
                 raise click.BadParameter("cloud_storage_params.storage_root is mandatory for s3:// output")
 

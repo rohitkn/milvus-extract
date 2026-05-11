@@ -36,9 +36,6 @@ extract:
     # use s3.amazonaws.com for AWS
     # use storage.googleapis.com for Google Cloud
     endpoint: 'localhost:9000'  
-    # Access key (string, mandatory)
-    access_key: 'minioadmin'
-    # Secret key (string, mandatory)
-    secret_key: 'minioadmin'
+    # Access key (string, mandatory), Secret Key Will be read from .env file.
     # Storage root / bucket (string, mandatory). Default: 'a-bucket'
     storage_root: 'a-bucket'
