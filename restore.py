@@ -6,16 +6,17 @@ extract.py --dump-schema / --dump-schema-all (layout: db_dir/<collection>__schem
 """
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
 import click
 import yaml
+from dotenv import load_dotenv
 from pymilvus import CollectionSchema, MilvusClient
 
 CONNECT_DEFAULTS = {
     "endpoint": "https://localhost:19530",
-    "api_key": "root:Milvus",
 }
 
 # Keys from describe_index / dump that are not index-build parameters
@@ -34,19 +35,16 @@ INDEX_DESCRIBE_META_KEYS = frozenset(
 )
 
 
-def _load_connect_config(path: Path) -> tuple[str, str]:
+def _load_connect_config(path: Path) -> str:
     with open(path) as f:
         data = yaml.safe_load(f)
     if not data or "connect" not in data:
         raise click.BadParameter("YAML must have a root key 'connect'")
     raw: dict[str, Any] = data["connect"] or {}
     endpoint = raw.get("endpoint", CONNECT_DEFAULTS["endpoint"])
-    api_key = raw.get("api_key", CONNECT_DEFAULTS["api_key"])
     if not isinstance(endpoint, str):
         raise click.BadParameter("connect.endpoint must be a string")
-    if not isinstance(api_key, str):
-        raise click.BadParameter("connect.api_key must be a string")
-    return endpoint, api_key
+    return endpoint
 
 
 def _collection_from_schema_filename(filename: str) -> str | None:
@@ -264,7 +262,7 @@ def _restore_collections(
     "connect_config_file",
     type=click.Path(exists=True, path_type=Path),
     required=True,
-    help="Milvus connection YAML (root key 'connect': endpoint, api_key).",
+    help="Milvus connection YAML (root key 'connect': endpoint).",
 )
 @click.option(
     "--restore-collections-meta",
@@ -293,7 +291,9 @@ def main(
     if not restore_collections_meta:
         raise click.UsageError("Specify --restore-collections-meta to run restore.")
 
-    uri, token = _load_connect_config(connect_config_file)
+    load_dotenv()
+    token = os.getenv("TARGET_API_TOKEN", "root:Milvus")
+    uri = _load_connect_config(connect_config_file)
     client = MilvusClient(uri=uri, token=token)
     db_name = database_dir.name
     _restore_collections(
@@ -303,7 +303,6 @@ def main(
         ignore_default_partition=ignore_default_partition,
         preserve_index_type=preserve_index_type,
     )
-
 
 if __name__ == "__main__":
     main()
