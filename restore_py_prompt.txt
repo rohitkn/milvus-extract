@@ -1,0 +1,24 @@
+
+modify restore.py to add a command: --restore-collection-data
+This accepts a parameter --database-dir and -i PATH
+The connection to the milvus endpoint is made with MilvusClient where the endpoint is read from option -i PATH as a yaml file with key connect.endpoint
+The API token is read from .env using load_dotenv() using the variable TARGET_API_TOKEN
+Then here are the steps
+1. the database-dir must start with either 'file://' or 's3://' or 'gs://'
+2. the database-dir is the name of the database to which collections are restored. assume very last string token after the last / is the database directroy
+3. verify that database exists in the endpoint by matching against client.list_databases(); if it does not exist create it with client.create_database
+4. then using client.using_database restore collections data with the following:
+5. collection data is stored in sub-directories named in this way col_<collection_name>__timestamp.time under database-dir
+6. from the list of subdirectories gather just the collection_name to write data into
+7. expect to find the subdirectory 'partition' inside col_<collection_name>__timestamp.time; now from here:
+8. if the --database-dir starts with 's3://' or 'gs://'
+8-1. and a partition dir other than '_default' exists under any collection's partition directory then abort with error message "cloud storage bulk import into named partitions is not supported"
+8-2. if only the _default partition exists then run a bulk_import into the endpoint using the remotebulkwriter.s3connectparam - https://docs.zilliz.com/reference/python/python/RemoteBulkWriter-S3ConnectParam: credentials in path from -i option under cloud_storage_params
+9. otherwise if database-dir starts with 'file://' assume that the very last token after the last / is the database directroy
+9-1. All data loading will be done using client.insert(collection_name=collection, data=data) where the data will be an array of dict objects
+9-2. in the 'partition' directory if there are sub-directories not named _default, use client.add_partition with the directory name
+9-3. For all sub-directories one level under 'partition' is the partition name, the second level is a directory named with uuid like this '2c80f21d-760a-4d26-be0a-101a17091db4'. Loop over files in that uuid-named-directory. if it's parquet convert it to json or dict and write using client.insert. If the file is json, convert each row to dict and write using client.insert
+
+
+
+
