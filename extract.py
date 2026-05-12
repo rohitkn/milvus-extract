@@ -334,7 +334,7 @@ def _run_list_collections(endpoint: str, api_key: str, database: str) -> None:
         click.echo(f"ERROR: Exception connecting to Milvus: {e}")
         return
     for name in client.list_collections():
-        click.echo(f"Collection: {name}")
+        click.echo(f"{name}")
 
 
 def _write_collection_indexes_json(client: Any, collection: str, schema_dir: Path) -> None:
