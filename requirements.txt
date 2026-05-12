@@ -1,3 +1,4 @@
 click>=8.0.0
 PyYAML>=6.0
 pymilvus>=2.5.0
+datasets>=2.14.0

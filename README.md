@@ -1,9 +1,10 @@
 # milvus-extract
 
-Tools for **extracting** Milvus collection data to disk and **restoring** database metadata from JSON dumps produced by the extract tool.
+Tools for **extracting** Milvus collection data to disk and **restoring** metadata and bulk-exported rows.
 
 - **`extract.py`** — Pulls data from a Milvus endpoint via `query_iterator` and writes to disk (JSON or Parquet) at `file://` or `s3://` locations. Can also list databases/collections and dump schemas and indexes to JSON.
-- **`restore.py`** — Recreates database, collections, partitions, and indexes from JSON layout: `db_dir/<collection>__schema.json`, `<collection>__<partition>__part.json`, and `<collection>__indexes.json`.
+- **`restore.py`** — Restores metadata from JSON dumps (`--restore-collections-meta`) or restores rows from bulk export paths (`--restore-collection-data`).
+- **FOR BOTH:**  You will need a .env file containing `SOURCE_API_TOKEN`, and if needed - `CLOUD_STORAGE_ACCESS_KEY, CLOUD_STORAGE_SECRET_KEY`
 
 ## Setup
 
@@ -19,7 +20,7 @@ Usage: extract.py [OPTIONS]
   Pull data from a Milvus endpoint via query_iterator and write to disk.
 
 Options:
-  -d, --database TEXT    Database name (default: None).
+  -d, --database TEXT    Database name to extract from (default: None).
   -c, --collection TEXT  Collection name (default: None).
   -f PATH                Path to YAML config file (required for extract).
   -i PATH                Path to YAML Milvus connection credentials file (for
@@ -44,15 +45,20 @@ Options:
 ```
 Usage: restore.py [OPTIONS]
 
-  Restore Milvus metadata from dumped JSON (use --restore-collections-meta).
+  Restore Milvus metadata or collection data.
 
 Options:
-  --database-dir DIRECTORY    Directory named like the target Milvus database
-                              (basename = db name).  [required]
-  -i PATH                     Milvus connection YAML (root key 'connect':
-                              endpoint, api_key).  [required]
+  --database-dir TEXT         For --restore-collections-meta: local directory
+                              path. For --restore-collection-data: file://,
+                              s3://, or gs:// URI; last path segment is the
+                              database name.  [required]
+  -i PATH                     Milvus YAML: connect.endpoint; for remote data
+                              import also cloud_storage_params (see docs).
+                              [required]
   --restore-collections-meta  Create database, collections, partitions, and
                               indexes from JSON in --database-dir.
+  --restore-collection-data   Restore rows from bulk export under --database-
+                              dir (file://, s3://, or gs://).
   --ignore-default-partition  Skip restoring the _default partition (Milvus
                               already has an implicit default).
   --preserve-index-type       Use index_type from dumped JSON; otherwise use
