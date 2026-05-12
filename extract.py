@@ -318,7 +318,7 @@ def _run_list_databases(endpoint: str, api_key: str) -> None:
         click.echo(f"ERROR: Exception connecting to Milvus: {e}")
         return
     for name in client.list_databases():
-        click.echo(f"Database: {name}")
+        click.echo(f"{name}")
 
 
 def _run_list_collections(endpoint: str, api_key: str, database: str) -> None:
