@@ -93,13 +93,65 @@ def _cloud_storage_params_from_yaml(data: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def _cluster_id_from_zilliz_host(hostname: str) -> str:
+    """
+    Cluster id is the first hostname label (before the first dot), with a
+    trailing '-privatelink' segment removed (case-insensitive on the suffix).
+    """
+    if not hostname:
+        return ""
+    first = hostname.split(".")[0]
+    lower = first.lower()
+    suf = "-privatelink"
+    if lower.endswith(suf):
+        return first[: -len(suf)]
+    return first
+
+
 def _derive_zilliz_bulk_import_url_and_cluster(milvus_endpoint: str) -> tuple[str | None, str | None]:
-    """From a Zilliz Cloud vectordb hostname, derive REST import base URL and cluster id."""
+    """Derive REST bulk-import base URL and cluster id from Zilliz / Zilliz Cloud hostnames."""
     try:
         parsed = urlparse(milvus_endpoint)
-        host = (parsed.hostname or "").lower()
+        host_raw = parsed.hostname or ""
+        host = host_raw.lower()
     except Exception:
         return None, None
+    if not host_raw:
+        return None, None
+
+    cluster_id = _cluster_id_from_zilliz_host(host_raw)
+    if not cluster_id:
+        return None, None
+
+    is_cn = host.endswith(".zillizcloud.com.cn") or host.endswith(".cloud.zilliz.com.cn")
+
+    # Serverless: <cluster>.serverless.<region>.cloud.zilliz.com
+    # e.g. in05-5a64a71f44fc942.serverless.aws-eu-central-1.cloud.zilliz.com
+    if ".serverless." in host and ".cloud.zilliz.com" in host:
+        parts = host.split(".")
+        try:
+            si = parts.index("serverless")
+        except ValueError:
+            return None, None
+        if si + 1 >= len(parts):
+            return None, None
+        region = parts[si + 1]
+        if is_cn:
+            import_url = f"https://api.{region}.cloud.zilliz.com.cn"
+        else:
+            import_url = f"https://api.{region}.cloud.zilliz.com"
+        return import_url, cluster_id
+
+    # Global cluster: <cluster>.global-cluster.vectordb.zillizcloud.com
+    if ".global-cluster.vectordb.zillizcloud." in host:
+        if is_cn:
+            import_url = "https://api.global-cluster.zillizcloud.com.cn"
+        else:
+            import_url = "https://api.global-cluster.zillizcloud.com"
+        return import_url, cluster_id
+
+    # Dedicated / BYOC: <cluster>.<region>.vectordb.zillizcloud.com[:port]
+    # Region may be aws-*, gcp-*, az-* (Azure); cluster label may end with -privatelink (stripped above).
     if ".vectordb.zillizcloud." not in host:
         return None, None
     parts = host.split(".")
@@ -109,11 +161,14 @@ def _derive_zilliz_bulk_import_url_and_cluster(milvus_endpoint: str) -> tuple[st
         return None, None
     if vidx < 2:
         return None, None
-    cluster_id = parts[vidx - 2]
     region = parts[vidx - 1]
-    if not (region.startswith("gcp-") or region.startswith("aws-")):
+    if not (
+        region.startswith("aws-")
+        or region.startswith("gcp-")
+        or region.startswith("az-")
+    ):
         return None, None
-    if host.endswith(".zillizcloud.com.cn"):
+    if is_cn:
         import_url = f"https://api.{region}.zillizcloud.com.cn"
     else:
         import_url = f"https://api.{region}.zillizcloud.com"
