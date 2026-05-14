@@ -4,7 +4,22 @@ Tools for **extracting** Milvus collection data to disk and **restoring** metada
 
 - **`extract.py`** — Pulls data from a Milvus endpoint via `query_iterator` and writes to disk (JSON or Parquet) at `file://` or `s3://` locations. Can also list databases/collections and dump schemas and indexes to JSON.
 - **`restore.py`** — Restores metadata from JSON dumps (`--restore-collections-meta`) or restores rows from bulk export paths (`--restore-collection-data`).
-- **FOR BOTH:**  You will need a .env file containing `SOURCE_API_TOKEN`, and if needed - `CLOUD_STORAGE_ACCESS_KEY, CLOUD_STORAGE_SECRET_KEY`
+
+## Environment variables (`.env`)
+
+Place a `.env` file in the working directory (or ensure variables are exported); `extract.py` and `restore.py` load it via `python-dotenv` where applicable.
+
+| Variable | Description |
+| -------- | ----------- |
+| `SOURCE_API_TOKEN` | Milvus API key / token used for **data export** (`extract.py -f`). Falls back to `root:Milvus` if unset. |
+| `API_TOKEN` | Milvus API key / token used for **extract.py** CLI actions with `-i` only (e.g. `--list-databases`, `--dump-schema`). Falls back to `root:Milvus` if unset. |
+| `TARGET_API_TOKEN` | Milvus API key / token used for **restore.py** (metadata and collection-data restore). Falls back to `root:Milvus` if unset. |
+| `CLOUD_STORAGE_ACCESS_KEY` | Object storage access key for **S3 bulk export** (`extract.py` when `output_location` is `s3://`) and **remote bulk import** (`restore.py --restore-collection-data` on `s3://` / `gs://`). |
+| `CLOUD_STORAGE_SECRET_KEY` | Object storage secret key; pair with `CLOUD_STORAGE_ACCESS_KEY`. |
+| `AWS_ACCESS_KEY_ID` | Alternative to `CLOUD_STORAGE_ACCESS_KEY` if the dedicated names are not set. |
+| `AWS_SECRET_ACCESS_KEY` | Alternative to `CLOUD_STORAGE_SECRET_KEY` if the dedicated names are not set. |
+
+Object-storage keys are read from the environment only (not from extract YAML). Endpoint and bucket for S3 still come from your YAML `cloud_storage_params` where required.
 
 ## Setup
 
