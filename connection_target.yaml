@@ -6,7 +6,7 @@ connect:
   endpoint: https://in01-cdc47638b1fecdf.gcp-us-west1.vectordb.zillizcloud.com:443
   
   # API key / token for Milvus (string, mandatory). Default: 'root:Milvus' will be read from .env file.
- cloud_storage_params:
+  cloud_storage_params:
     # Endpoint (string). Default: 'localhost:9000' for minio
     # use s3.amazonaws.com for AWS
     # use storage.googleapis.com for Google Cloud

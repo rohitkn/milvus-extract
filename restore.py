@@ -2,10 +2,15 @@
 """
 Restore Milvus database, collections, and partitions from JSON produced by
 extract.py --dump-schema / --dump-schema-all (layout: db_dir/<collection>__schema.json,
-<collection>__<partition>__part.json, and <collection>__indexes.json or <collection>_indexes.json).
+optional <collection>__<partition>__part.json when the collection has no partition key,
+and <collection>__indexes.json).
+
+Collections with a partition key in __schema.json omit __part.json dumps; metadata
+restore skips create_partition from any stray __part.json for those collections.
 
 Also restore bulk-exported rows with --restore-collection-data from file://, s3://, or gs://
-paths matching extract.py bulk writer layout (col_<name>__<timestamp>/partition/...).
+paths matching extract.py bulk writer layout (col_<name>__<timestamp>/partition/...,
+using partition/<literal _partition_key>/... when the collection uses a Milvus partition key).
 """
 
 import json
@@ -26,12 +31,13 @@ CONNECT_DEFAULTS = {
     "endpoint": "https://localhost:19530",
 }
 
-COL_DIR_RE = re.compile(r"^col_(.+)__(.+)$")
+COL_DIR_RE = re.compile(r"^col_(.+)__(\d+(?:\.\d+)?)$")
 UUID_DIR_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
     re.IGNORECASE,
 )
 INSERT_BATCH = 500
+PARTITION_KEY_EXPORT_DIR = "_partition_key"
 
 # Keys from describe_index / dump that are not index-build parameters
 INDEX_DESCRIBE_META_KEYS = frozenset(
@@ -233,7 +239,7 @@ def _parse_database_dir_uri(raw: str) -> tuple[str, str, dict[str, Any]]:
             raise click.BadParameter("--database-dir must include a database path segment")
         return scheme, db_name, {"bucket": bucket, "prefix": prefix}
     raise click.BadParameter(
-        "--database-dir must start with file://, s3://, or gs:// for --restore-collection-data"
+        "--database-dir must start with file:// then /<localpath> or s3://, or gs:// for --restore-collection-data"
     )
 
 
@@ -310,20 +316,29 @@ def _insert_batches(
     collection_name: str,
     rows: list[dict[str, Any]],
     partition_name: str,
+    *,
+    omit_partition_name: bool = False,
 ) -> None:
     if not rows:
         return
-    pn = partition_name if partition_name != "_default" else ""
     for i in range(0, len(rows), INSERT_BATCH):
         batch = rows[i : i + INSERT_BATCH]
-        client.insert(
-            collection_name=collection_name,
-            data=batch,
-            partition_name=pn,
-        )
+        if omit_partition_name:
+            client.insert(collection_name=collection_name, data=batch)
+        else:
+            pn = partition_name if partition_name != "_default" else ""
+            client.insert(
+                collection_name=collection_name,
+                data=batch,
+                partition_name=pn,
+            )
         click.echo(
             f"Inserted {len(batch)} row(s) into {collection_name!r}"
-            + (f" partition={partition_name!r}" if pn else "")
+            + (
+                ""
+                if omit_partition_name
+                else (f" partition={partition_name!r}" if partition_name != "_default" else "")
+            )
         )
 
 
@@ -351,18 +366,27 @@ def _restore_collection_data_file(
         if not part_root.is_dir():
             click.echo(f"WARN: No partition/ under {col_root}, skipping {collection_name!r}")
             continue
-        for part_path in sorted(p for p in part_root.iterdir() if p.is_dir()):
-            partition_name = part_path.name
-            if partition_name != "_default":
-                if not client.has_partition(collection_name, partition_name):
-                    client.create_partition(
-                        collection_name=collection_name,
-                        partition_name=partition_name,
-                    )
-                    click.echo(
-                        f"Created partition {partition_name!r} on collection {collection_name!r}"
-                    )
-            for uuid_dir in sorted(d for d in part_path.iterdir() if d.is_dir()):
+
+        desc = _load_schema_desc(db_root, collection_name)
+        subdirs = sorted(p.name for p in part_root.iterdir() if p.is_dir())
+        has_pk = (desc is not None and _schema_desc_has_partition_key(desc)) or (
+            desc is None and subdirs == [PARTITION_KEY_EXPORT_DIR]
+        )
+        if desc is None and subdirs == [PARTITION_KEY_EXPORT_DIR]:
+            click.echo(
+                f"[{collection_name}] No __schema.json; inferring partition key from "
+                f"partition/{PARTITION_KEY_EXPORT_DIR}/ only"
+            )
+
+        if has_pk:
+            pk_path = part_root / PARTITION_KEY_EXPORT_DIR
+            if not pk_path.is_dir():
+                click.echo(
+                    f"WARN: Partition key collection {collection_name!r} missing "
+                    f"partition/{PARTITION_KEY_EXPORT_DIR}/ under {col_root}, skipping"
+                )
+                continue
+            for uuid_dir in sorted(d for d in pk_path.iterdir() if d.is_dir()):
                 if not UUID_DIR_RE.match(uuid_dir.name):
                     continue
                 for fpath in sorted(uuid_dir.iterdir()):
@@ -375,7 +399,47 @@ def _restore_collection_data_file(
                         rows = _read_parquet_rows(fpath)
                     else:
                         continue
-                    _insert_batches(client, collection_name, rows, partition_name)
+                    _insert_batches(
+                        client,
+                        collection_name,
+                        rows,
+                        PARTITION_KEY_EXPORT_DIR,
+                        omit_partition_name=True,
+                    )
+        else:
+            for part_path in sorted(p for p in part_root.iterdir() if p.is_dir()):
+                if part_path.name == PARTITION_KEY_EXPORT_DIR:
+                    continue
+                partition_name = part_path.name
+                if partition_name != "_default":
+                    if not client.has_partition(collection_name, partition_name):
+                        client.create_partition(
+                            collection_name=collection_name,
+                            partition_name=partition_name,
+                        )
+                        click.echo(
+                            f"Created partition {partition_name!r} on collection {collection_name!r}"
+                        )
+                for uuid_dir in sorted(d for d in part_path.iterdir() if d.is_dir()):
+                    if not UUID_DIR_RE.match(uuid_dir.name):
+                        continue
+                    for fpath in sorted(uuid_dir.iterdir()):
+                        if not fpath.is_file():
+                            continue
+                        suf = fpath.suffix.lower()
+                        if suf == ".json":
+                            rows = _read_json_or_ndjson_file(fpath)
+                        elif suf == ".parquet":
+                            rows = _read_parquet_rows(fpath)
+                        else:
+                            continue
+                        _insert_batches(
+                            client,
+                            collection_name,
+                            rows,
+                            partition_name,
+                            omit_partition_name=False,
+                        )
         click.echo(f"Finished file restore for collection {collection_name!r}")
 
 
@@ -552,20 +616,29 @@ def _restore_collection_data_remote(
             continue
         scheme_prefix = f"{scheme}://{bucket}/"
         object_urls = [[scheme_prefix + k] for k in sorted(key_list)]
-        click.echo(
-            f"bulk_import collection={coll!r} partition={part!r} files={len(object_urls)}"
-        )
-        resp = bulk_import(
+        omit_pn = part == PARTITION_KEY_EXPORT_DIR
+        if omit_pn:
+            click.echo(
+                f"bulk_import collection={coll!r} (partition key export, no partition_name) "
+                f"files={len(object_urls)}"
+            )
+        else:
+            click.echo(
+                f"bulk_import collection={coll!r} partition={part!r} files={len(object_urls)}"
+            )
+        bi_kwargs: dict[str, Any] = dict(
             url=import_url,
             api_key=api_key,
             cluster_id=cluster_id,
             db_name=db_name,
             collection_name=coll,
-            partition_name=part,
             object_urls=object_urls,
             access_key=csp["access_key"],
             secret_key=csp["secret_key"],
         )
+        if not omit_pn:
+            bi_kwargs["partition_name"] = part
+        resp = bulk_import(**bi_kwargs)
         body = resp.json()
         job_id = (
             (body.get("data") or {}).get("jobId")
@@ -620,9 +693,31 @@ def _parse_partition_filename(
     return None
 
 
+def _schema_desc_has_partition_key(desc: dict[str, Any]) -> bool:
+    """True if dumped __schema.json has a field with is_partition_key (Milvus partition key)."""
+    for f in desc.get("fields") or []:
+        if not isinstance(f, dict):
+            continue
+        if f.get("is_partition_key") or f.get("isPartitionKey"):
+            return True
+    return False
+
+
+def _load_schema_desc(database_dir: Path, collection_name: str) -> dict[str, Any] | None:
+    path = database_dir / f"{collection_name}__schema.json"
+    if not path.is_file():
+        return None
+    try:
+        raw = json.loads(path.read_text())
+    except json.JSONDecodeError:
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
 def _indexes_path_for_collection(database_dir: Path, collection: str) -> Path | None:
-    for suffix in ("__indexes.json"):
+    for suffix in ["__indexes.json", "_indexes.json"]:
         p = database_dir / f"{collection}{suffix}"
+        print(f"indexes_path_for_collection: {p}")
         if p.is_file():
             return p
     return None
@@ -728,6 +823,15 @@ def _restore_collections(
     ]
     assert None not in collection_names
 
+    pk_by_coll: dict[str, bool] = {}
+    for path in schema_paths:
+        cn = _collection_from_schema_filename(path.name)
+        assert cn is not None
+        desc = json.loads(path.read_text())
+        pk_by_coll[cn] = (
+            _schema_desc_has_partition_key(desc) if isinstance(desc, dict) else False
+        )
+
     dbs = client.list_databases()
     if db_name not in dbs:
         client.create_database(db_name=db_name)
@@ -762,6 +866,12 @@ def _restore_collections(
                 f"(known collections: {collection_names})"
             )
         coll_name, partition_name = parsed
+        if pk_by_coll.get(coll_name):
+            click.echo(
+                f"WARN: Ignoring {path.name!r} — collection {coll_name!r} has a partition key "
+                "(__part.json not expected); skip create_partition from this file"
+            )
+            continue
         if ignore_default_partition and partition_name == "_default":
             click.echo(
                 f"Skipping partition {partition_name!r} on {coll_name!r} (implicit default)"

@@ -3,10 +3,10 @@
 
 extract:
   # Database name (string, mandatory). Default: 'default'
-  database: milvus_image_db
+  database: write_test1
 
   # Collection name (string, mandatory). Default: ''
-  collection: 'prod_ann5'
+  collection: 'doyying'
 
   # Milvus endpoint (string, mandatory). Default: https://localhost:19530
   endpoint: http://localhost:19530
