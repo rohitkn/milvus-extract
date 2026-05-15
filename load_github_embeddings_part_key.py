@@ -10,7 +10,7 @@ from pymilvus import DataType, MilvusClient
 
 ENDPOINT = "http://localhost:19530"
 DB_NAME = "write_test1"
-COLLECTION_NAME = "doyying"
+COLLECTION_NAME = "doyying2"
 DATASET_NAME = "DoyyingFace/github-embeddings-doy"
 
 VARCHAR_LONG = 65535
@@ -36,7 +36,7 @@ def _create_schema():
 
 def _create_index_params():
     index_params = MilvusClient.prepare_index_params()
-    index_params.add_index(
+    index_params.add_index( #by commenting these lines i was testing if the data is inserted without indexes,
         field_name="embeddings",
         index_type="IVF_FLAT",
         index_name="embeddings_index",
