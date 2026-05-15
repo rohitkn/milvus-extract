@@ -6,8 +6,9 @@ extract:
   database: write_test1
 
   # Collection name (string, mandatory). Default: ''
-  collection: 'doyying'
-
+  collection: ''
+  # Skip unindexed collections (boolean). Default: false
+  skip_unindexed: false
   # Milvus endpoint (string, mandatory). Default: https://localhost:19530
   endpoint: http://localhost:19530
 
@@ -27,7 +28,7 @@ extract:
 
   # Output destination: file:///path/to/file
   # Output destination or s3://bucket/remote/path -- NOTE: bucket is not needed if cloud_storage_params.storage_root is set
-  output_location: file://Users/rohitn/tmp/milvus_export
+  output_location: file://Users/rohitn/tmp/milvus_export/
   #output_location: s3://a-bucket/milvus_export
 
   # Cloud storage (S3-compatible) parameters
