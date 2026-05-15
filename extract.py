@@ -678,7 +678,7 @@ def main(
             raise click.UsageError("actions can only be used with -i/--connect-config-file")
             
         config = load_config(str(extract_config_file), None)
-        config["skip_unindexed"] = skip_unindexed
+        config["skip_unindexed"] = config.get("skip_unindexed", skip_unindexed)
         run_extract(config)
         return
     elif not any(actions):
