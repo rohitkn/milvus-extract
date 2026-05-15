@@ -22,7 +22,7 @@ from dotenv import load_dotenv
 DEFAULTS = {
     "database": "default",
     "collection": "",
-    "endpoint": "https://localhost:19530",
+    "endpoint": "http://localhost:19530",
     "api_key": "root:Milvus",
     "buffer": 2000,
     "max_rows_per_file": 10000,
@@ -402,15 +402,22 @@ def run_extract(config: dict[str, Any]) -> None:
     from pymilvus import CollectionSchema
     max_rows_per_file = config["max_rows_per_file"]
     total_fetched_all = 0
+    skip_unindexed = bool(config.get("skip_unindexed", False))
 
     for collection_name in collections_to_extract:
+        if not client.has_collection(collection_name=collection_name):
+            click.echo(f"ERROR: Collection {collection_name} not found. Skipping export.")
+            continue
+        if skip_unindexed and len(client.list_indexes(collection_name=collection_name)) == 0:
+            click.echo(f"[{collection_name}] Skipping export (--skip-unindexed: no indexes).")
+            continue
         desc = client.describe_collection(collection_name=collection_name)
         schema = CollectionSchema.construct_from_dict(desc)
 
         try:
             client.load_collection(collection_name=collection_name)
         except MilvusException as e:
-            click.echo(f"ERROR: Exception raised: {e}, Please check collection name ({collection_name})")
+            click.echo(f"ERROR: Exception raised on load collection: {e}, Please check collection name ({collection_name}).")
             continue
         collection_dir = f"col_{collection_name}__{time.time()}"
         remove_auto_id_field = schema.primary_field.name if schema.primary_field is not None and schema.auto_id == True and schema.primary_field.auto_id == True else None
@@ -495,8 +502,11 @@ def _run_list_collections(endpoint: str, api_key: str, database: str) -> None:
         click.echo(f"{name}")
 
 
-def _write_collection_indexes_json(client: Any, collection: str, schema_dir: Path) -> None:
+def _write_collection_indexes_json(client: Any, collection: str, schema_dir: Path) -> int:
+    """Write ``{collection}__indexes.json``; return number of indexes (0 if none, no file written)."""
     index_names = client.list_indexes(collection_name=collection)
+    if len(index_names) == 0:
+        return 0
     index_descs: list[Any] = []
     for index_name in index_names:
         index_descs.append(
@@ -505,17 +515,32 @@ def _write_collection_indexes_json(client: Any, collection: str, schema_dir: Pat
     path = schema_dir / f"{collection}__indexes.json"
     path.write_text(json.dumps(index_descs, indent=2, default=str))
     click.echo(f"Wrote {path}")
+    return len(index_descs)
 
 
 def _run_dump_schema(
-    endpoint: str, api_key: str, database: str, collection: str, out_dir: Path
+    client: Any,
+    database: str,
+    collection: str,
+    out_dir: Path,
+    *,
+    skip_unindexed: bool = False,
 ) -> None:
     from pymilvus import CollectionSchema
 
-    client = _client(endpoint, api_key, db_name=database)
-    desc = client.describe_collection(collection_name=collection)
     schema_dir = out_dir / database
     schema_dir.mkdir(parents=True, exist_ok=True)
+
+    if skip_unindexed:
+        n = _write_collection_indexes_json(client, collection, schema_dir)
+        if n == 0:
+            click.echo(
+                f"Skipping {collection!r} (--skip-unindexed: no indexes); "
+                "no __schema.json or __part.json written."
+            )
+            return
+
+    desc = client.describe_collection(collection_name=collection)
     path = schema_dir / f"{collection}__schema.json"
     path.write_text(json.dumps(desc, indent=2, default=str))
     click.echo(f"Wrote {path}")
@@ -531,49 +556,23 @@ def _run_dump_schema(
         click.echo(
             f"Skipping {collection!r} __part.json files (partition key collection)"
         )
-    _write_collection_indexes_json(client, collection, schema_dir)
+    if not skip_unindexed:
+        _write_collection_indexes_json(client, collection, schema_dir)
 
 
-def _run_dump_schema_all(endpoint: str, api_key: str, database: str, out_dir: Path) -> None:
-    from pymilvus import CollectionSchema
-
-    client = _client(endpoint, api_key, db_name=database)
-    schema_dir = out_dir / database
-    schema_dir.mkdir(parents=True, exist_ok=True)
+def _run_dump_schema_all(
+    client: Any, database: str, out_dir: Path, *, skip_unindexed: bool = False
+) -> None:
     for name in client.list_collections():
-        desc = client.describe_collection(collection_name=name)
-        path = schema_dir / f"{name}__schema.json"
-        path.write_text(json.dumps(desc, indent=2, default=str))
-        click.echo(f"Wrote {path}")
-        schema = CollectionSchema.construct_from_dict(desc)
-        if not _schema_has_partition_key(schema):
-            list_of_partitions = client.list_partitions(collection_name=name)
-            for partition in list_of_partitions:
-                partition_desc = client.get_partition_stats(collection_name=name, partition_name=partition)
-                path = schema_dir / f"{name}__{partition}__part.json"
-                path.write_text(json.dumps(partition_desc, indent=2, default=str))
-                click.echo(f"Wrote {path}")
-        else:
-            click.echo(
-                f"Skipping {name!r} __part.json files (partition key collection)"
-            )
-        _write_collection_indexes_json(client, name, schema_dir)
+        _run_dump_schema(client, database, name, out_dir, skip_unindexed=skip_unindexed)
 
 
 def _run_dump_indexes(
-    endpoint: str, api_key: str, database: str, collection: str, out_dir: Path
+    client: Any, database: str, collection: str, out_dir: Path
 ) -> None:
-    client = _client(endpoint, api_key, db_name=database)
-    indexes = client.list_indexes(collection_name=collection)
-    indexes_dir = out_dir / database
-    indexes_dir.mkdir(parents=True, exist_ok=True)
-    index_desc = []
-    for index in indexes:
-        index_desc.append(str(client.describe_index(collection_name=collection, index_name=index)))
-    
-    with open(indexes_dir / f"{collection}__indexes.json", "a") as f:
-        f.write('\n'.join(index_desc))
-    click.echo(f"Wrote {indexes_dir / f"{collection}__indexes.json"}")
+    schema_dir = out_dir / database
+    schema_dir.mkdir(parents=True, exist_ok=True)
+    _write_collection_indexes_json(client, collection, schema_dir)
 
 @click.command()
 @click.option(
@@ -588,7 +587,7 @@ def _run_dump_indexes(
     "collection",
     "--collection",
     default=None,
-    help="Collection name (default: None).",
+    help="Collection name (default: None). Optional for --dump-indexes (all collections if omitted).",
 )
 @click.option(
     "-f",
@@ -623,7 +622,8 @@ def _run_dump_indexes(
 @click.option(
     "--dump-indexes",
     is_flag=True,
-    help="Write given collection's indexes as JSON in schema_dir/dbname/ Use with -d/--database and -c/--collection"
+    help="Write indexes as JSON lines in schema_dir/dbname/ per collection. "
+    "Use with -d/--database; -c/--collection optional (all collections if omitted).",
 )
 @click.option(
     "--schema-dir",
@@ -631,9 +631,15 @@ def _run_dump_indexes(
     default=Path("."),
     help="Directory for schema JSON files (default: current directory).",
 )
+@click.option(
+    "--skip-unindexed",
+    is_flag=True,
+    help="With --dump-schema / --dump-schema-all: write __indexes.json first; if no indexes, "
+    "skip __schema.json and __part.json. With -f extract_config.yaml: skip exporting collections that have no indexes.",
+)
 def main(
-    database: str,
-    collection: str,
+    database: str | None,
+    collection: str | None,
     extract_config_file: Path | None,
     connect_config_file: Path | None,
     list_databases: bool,
@@ -642,12 +648,17 @@ def main(
     dump_schema_all: bool,
     dump_indexes: bool,
     schema_dir: Path,
+    skip_unindexed: bool,
 ) -> None:
     """Pull data from a Milvus endpoint via query_iterator and write to disk."""
     actions = [list_databases, list_collections, dump_schema, dump_schema_all, dump_indexes]
     if sum(actions) > 1:
         raise click.UsageError(
             "At most one of --list-databases, --list-collections, --dump-schema, --dump-schema-all, --dump-indexes may be set."
+        )
+    if skip_unindexed and not (dump_schema or dump_schema_all or extract_config_file):
+        raise click.UsageError(
+            "--skip-unindexed is only valid with --dump-schema, --dump-schema-all, or -f/--extract-config-file."
         )
     load_dotenv()
     api_key = os.getenv("API_TOKEN", DEFAULTS["api_key"])
@@ -667,6 +678,7 @@ def main(
             raise click.UsageError("actions can only be used with -i/--connect-config-file")
             
         config = load_config(str(extract_config_file), None)
+        config["skip_unindexed"] = skip_unindexed
         run_extract(config)
         return
     elif not any(actions):
@@ -683,18 +695,41 @@ def main(
     if dump_schema:
         if not collection or not database:
             raise click.UsageError("--dump-schema requires -c/--collection and -d/--database.")
-        _run_dump_schema(endpoint, api_key, database, collection, schema_dir)
+        client = _client(endpoint, api_key, db_name=database)
+        try:
+            _run_dump_schema(
+                client, database, collection, schema_dir, skip_unindexed=skip_unindexed
+            )
+        finally:
+            client.close()
         return
     if dump_schema_all:
         if database is None:
             database = DEFAULTS["database"]
             click.echo(f"WARN: Database -d db_name not provided on command line. Using default database {DEFAULTS['database']}")
-        _run_dump_schema_all(endpoint, api_key, database, schema_dir)
+        client = _client(endpoint, api_key, db_name=database)
+        try:
+            _run_dump_schema_all(
+                client, database, schema_dir, skip_unindexed=skip_unindexed
+            )
+        finally:
+            client.close()
         return
     if dump_indexes:
-        if not collection or not database:
-            raise click.UsageError("--dump-indexes requires -c/--collection and -d/--database.")
-        _run_dump_indexes(endpoint, api_key, database, collection, schema_dir)
+        if database is None:
+            database = DEFAULTS["database"]
+            click.echo(
+                f"WARN: Database -d db_name not provided on command line. Using default database {DEFAULTS['database']}"
+            )
+        client = _client(endpoint, api_key, db_name=database)
+        try:
+            if collection:
+                _run_dump_indexes(client, database, collection, schema_dir)
+            else:
+                for name in client.list_collections():
+                    _run_dump_indexes(client, database, name, schema_dir)
+        finally:
+            client.close()
         return
     assert False, "unreachable"
 
